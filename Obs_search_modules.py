@@ -344,7 +344,7 @@ def get_norh_imgs(sT,eT,outdir='./'):
 	
 ############### Find the HESSI flare from flare cat for the period #############
 
-def find_flare(sT,eT,flare_cat="C:\\Users\\amohan\\Documents\\NASA\\Data\\hessi_flare_catalog.p"):
+def find_flare(sT,eT,flare_cat="hessi_flare_catalog.csv"):
 	'''
 	Flare that starts after sT and ends before eT are chosen
 	INPUT
@@ -375,7 +375,7 @@ def find_flare(sT,eT,flare_cat="C:\\Users\\amohan\\Documents\\NASA\\Data\\hessi_
 	return IDs,Tab
 	
 ##### Download RHESSI summary data #####
-def find_RHESSI(sT,eT,outdir='./',flare_cat="Data/hessi_flare_catalog.p",baseurl='https://data.darts.isas.jaxa.jp/pub/mirror/rhessi/'):
+def find_RHESSI(sT,eT,outdir='./',flare_cat="hessi_flare_catalog.csv",baseurl='https://data.darts.isas.jaxa.jp/pub/mirror/rhessi/'):
 	'''
 	Go to RHESSI browser and get the flare num to let the code download the image for the flare
 	INPUT
@@ -432,7 +432,7 @@ def find_RHESSI(sT,eT,outdir='./',flare_cat="Data/hessi_flare_catalog.p",baseurl
 	os.chdir(cwd)			
 
 ######### Find otherwave coobs
-def find_coobs(sT,eT,instrs,wvs,outdir='./',RHESSI_flarecat="hessi_flare_catalog.p",downdata=False):
+def find_coobs(sT,eT,instrs,wvs,outdir='./',RHESSI_flarecat="hessi_flare_catalog.csv",downdata=False):
 	'''
 	sT is the start datetime string of the event 'YYYY-MM-DDThh:mm:ss'.
 	eT is the end datetime string of the event 'YYYY-MM-DDThh:mm:ss'.
