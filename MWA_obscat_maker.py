@@ -48,10 +48,19 @@ while DT<=tf:
 		
 	tag=t1.split('-')[0]+'-'+t2.split('-')[0]
 	print('Getting data within: ',tag)	
-	minid=utc_gps(t1) # Leapseconds give the utc time + added seconds to correct for leapseconds. subtract it from GPS start date and take number of seconds to get the gps seconds time. 20 seconds are just subtracted so that you don't miss any observation around the date needed.	
-	maxid=utc_gps(t2)
+	
+	#minid=utc_gps(t1) # Leapseconds give the utc time + added seconds to correct for leapseconds. subtract it from GPS start date and take number of seconds to get the gps seconds time. 20 seconds are just subtracted so that you don't miss any observation around the date needed.	
+	#maxid=utc_gps(t2)
 	
 	print ('Starting to get the MWA Obs for the Solar Project....')
+	ST='%3A'.join(t1.split(':')[:-1])
+	ET='%3A'.join(t2.split(':')[:-1])
+	if cflag==0:
+		res=pd.read_html(BASEURL+'find/?search=search&html=1&projectid=G0002&dataquality=1&notdeleted=on&pagesize='+str(pagesize)+'&mode=HW_LFILES&mintime_utc='+ST+'&maxtime_utc='+ET+'&page=1')
+	else:
+		res=pd.read_html(BASEURL+'find/?search=search&html=1&projectid=G0002&dataquality=1&notdeleted=on&pagesize='+str(pagesize)+'&mintime_utc='+ST+'&maxtime_utc='+ET++'&page=1')
+	
+	
 	if clfag==0:
 		res=pd.read_html(BASEURL+'find/?search=search&html=1&projectid=G0002&pagesize='+str(pagesize)+'&mode=HW_LFILES&mintime='+str(minid)+'&maxtime='+str(maxid))
 	else:
