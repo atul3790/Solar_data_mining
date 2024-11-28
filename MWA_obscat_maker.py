@@ -58,7 +58,7 @@ while DT<=tf:
 	if cflag==0:
 		res=pd.read_html(BASEURL+'find/?search=search&html=1&projectid=G0002&dataquality=1&notdeleted=on&pagesize='+str(pagesize)+'&mode=HW_LFILES&mintime_utc='+ST+'&maxtime_utc='+ET+'&page=1')
 	else:
-		res=pd.read_html(BASEURL+'find/?search=search&html=1&projectid=G0002&dataquality=1&notdeleted=on&pagesize='+str(pagesize)+'&mintime_utc='+ST+'&maxtime_utc='+ET++'&page=1')
+		res=pd.read_html(BASEURL+'find/?search=search&html=1&projectid=G0002&dataquality=1&notdeleted=on&pagesize='+str(pagesize)+'&mintime_utc='+ST+'&maxtime_utc='+ET+'&page=1')
 	
 	
 	if clfag==0:
