@@ -57,8 +57,14 @@ while DT<=tf:
 	else:
 		res=pd.read_html(BASEURL+'find/?search=search&html=1&projectid=G0002&pagesize='+str(pagesize)+'&mintime='+str(minid)+'&maxtime='+str(maxid))
 	print('Found observations between ',tag)
-	pickle.dump(res[0],open(outdir+'MWAobs_'+tag+'.p','wb'))
-	res[0].to_csv(outdir+'MWAobs_'+tag+'.csv',index=False)	
+	
+	## Removing calibration observations ##########################
+	bads=np.array([cl for cl in range(len(res[0])) if 'sun' not in res[0]['Obs Name'][cl].lower()])
+	Tab=res[0].drop(bads)
+	Tab.reset_index(drop=True)
+	#################################################################
+	pickle.dump(Tab,open(outdir+'MWAobs_'+tag+'.p','wb'))
+	Tab.to_csv(outdir+'MWAobs_'+tag+'.csv',index=False)	
 	if DT+4<=tf:
 		DT=DT+4
 	else:
