@@ -19,6 +19,8 @@ outdir='Data/All_MWA_obs/'# This is the directory where all observation details 
 pagesize=27000# This is the maximum number of observation metadata returned by the querry at a time.
 t0=2018 # Start year as int
 tf=2024 # End year as int
+buffer_days=4 # the number of days before today, till when the code can search for events.
+			# if buffer_days=4. Code will search for events till today - 4 days.
 ########################################################################
 BASEURL = 'http://ws.mwatelescope.org/metadata/' # MWA metadata server
 
@@ -47,6 +49,8 @@ while DT<=tf:
 
 	t1=str(DT)+'-01-01T00:00:00'
 	t2=str(DT)+'-12-31T23:59:59'
+	if np.datetime64(t2)>np.datetime64('now'):
+		t2=str(np.datetime64('now')-np.timedelta64(buffer_days,'D'))
 		
 	tag=t1.split('-')[0]+'-'+t2.split('-')[0]
 	print('Getting data within: ',tag)	
