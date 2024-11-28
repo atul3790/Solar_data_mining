@@ -21,7 +21,6 @@ outdir='Data/All_MWA_obs/'# This is the directory where all observation details 
 pagesize=27000# This is the maximum number of observation metadata returned by the querry at a time.
 t0=2017 # Start year as int
 tf=2024 # End year as int
-mode= 1# 1. update existing binary pickle table 2. Get all observations for the date range
 #########################################################################
 
 BASEURL = 'http://ws.mwatelescope.org/metadata/' # MWA metadata server
@@ -33,18 +32,13 @@ if not os.path.isdir(outdir):
 	os.mkdir(outdir)
 ## If already earlier analysis results exist in the repository the code finds the last year 
 #for which the metadata is found. Then the start year is reset to the year from which there is no metadata file available
-if mode==1:
-	all_exist=sorted(glob.glob(outdir+'MWAobs_*.p'))
-	yrs=[]
-	if len(all_exist)>0:
-		for i in all_exist:
-			yrs+=[int(i.split('MWAobs_')[1].replace('.p','').split('-')[1])]
-		t0=np.max(yrs)+1
-	##########################
 	
 DT=t0
 flag=0
+cflag=0
 while DT<=tf:
+	if DT>2021:
+		cflag=1
 	t1=str(DT)+'-01-01T00:00:00'
 	if DT+3<tf:
 		t2=str(DT+3)+'-12-31T23:59:59'
@@ -58,7 +52,10 @@ while DT<=tf:
 	maxid=utc_gps(t2)
 	
 	print ('Starting to get the MWA Obs for the Solar Project....')
-	res=pd.read_html(BASEURL+'find/?search=search&html=1&projectid=G0002&pagesize='+str(pagesize)+'&mode=HW_LFILES&mintime='+str(minid)+'&maxtime='+str(maxid))
+	if clfag==0:
+		res=pd.read_html(BASEURL+'find/?search=search&html=1&projectid=G0002&pagesize='+str(pagesize)+'&mode=HW_LFILES&mintime='+str(minid)+'&maxtime='+str(maxid))
+	else:
+		res=pd.read_html(BASEURL+'find/?search=search&html=1&projectid=G0002&pagesize='+str(pagesize)+'&mintime='+str(minid)+'&maxtime='+str(maxid))
 	print('Found observations between ',tag)
 	pickle.dump(res[0],open(outdir+'MWAobs_'+tag+'.p','wb'))
 	res[0].to_csv(outdir+'MWAobs_'+tag+'.csv',index=False)	
