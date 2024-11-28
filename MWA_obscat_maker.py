@@ -80,7 +80,10 @@ while DT<=tf:
 					counter+=1
 				if counter==5:
 					print('Unable to find enddate for the year: ',t1)
-					break	
+					break
+		else:
+			res=pd.read_html(BASEURL+'find/?search=search&html=1&projectid=G0002&dataquality=1&notdeleted=on&pagesize='+str(pagesize)+'&mintime_utc='+ST+'&maxtime_utc='+ET+'&page=1')
+
 	bads=np.array([cl for cl in range(len(res[0])) if 'sun' not in res[0]['Obs Name'][cl].lower()])
 	try:
 		Tab=res[0].drop(bads)
