@@ -9,14 +9,14 @@ import sunpy.timeseries as ts
 from astropy import units as u
 from astropy.table import Table, Row, Column
 from radiospectra import net
-from radiospectra.sources.callisto import CallistoSpectrogram
+#from radiospectra.sources.callisto import CallistoSpectrogram
 import zipfile as zp
 from datetime import datetime as dt, timedelta
 import urllib,os
 from bs4 import BeautifulSoup as bs
-from radiospectra.spectrogram2 import Spectrogram
+from radiospectra.spectrogram import Spectrogram
 import matplotlib.pyplot as plt
-from aiapy.calibrate import register, update_pointing, normalize_exposure
+from aiapy.calibrate import register, update_pointing
 from sunpy.map import Map
 
 ### MWA obs query for a few date times
@@ -516,7 +516,7 @@ def find_coobs(sT,eT,instrs,wvs,outdir='./',RHESSI_flarecat="hessi_flare_catalog
 									AMap=Map(fil)
 									AMap=update_pointing(AMap) # Doing rotation corrections
 									AMap15=register(AMap) # Pixels fluxes are now corrected for direction offset issue and pixels rescaled to 0.6" and image y axes are now aligned with solar north-south axis
-									Amap15n=normalize_exposure(AMap15) # Making map normalised with respect to exposure times to get values in DN/s/pixel
+									Amap15n=AMap15/AMap15.exposure_time # Making map normalised with respect to exposure times to get values in DN/s/pixel
 
 									data_lev1=fits.open(fil,mode='update')
 									data_lev1[1].data=Amap15n.data
