@@ -8,6 +8,7 @@
 	MWA server thinks you are a scammer if this code is run more than once within a period
 	So if it fails with an HTTP 504 Gateway error its not a bug, just run the code tomorrow.
 	!!!!!!!!!!!!!!!!
+	test
 '''
 
 from datetime import datetime,timedelta
