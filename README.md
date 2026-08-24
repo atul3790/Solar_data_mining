@@ -9,10 +9,10 @@ This repository contains analysis utilities developed for compiling event-based 
 ## Main capabilities
 
 - Query and process event-date-based multi-wavelength solar observations.
-- Retrieve and inspect decameter–hectometric radio dynamic spectra.
+- Retrieve and inspect radio and microwave dynamic spectra from various repositories: RSTN, eCallisto, Wind/WAVES, STEREO/WAVES, MWA
 - Download SDO/AIA image cutouts for flare events.
 - Download and plot NoRP GHz light curves.
-- Match MWA observations with HEK flare/event information.
+- Match MWA solar radio observations with HEK flare/event information.
 - Generate MWA observing catalogs.
 - Support RHESSI flare catalog based hard X-ray event searches.
 
