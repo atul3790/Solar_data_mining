@@ -11,13 +11,17 @@ from astropy.table import Table, Row, Column
 from radiospectra import net
 #from radiospectra.sources.callisto import CallistoSpectrogram
 import zipfile as zp
-from datetime import datetime as dt, timedelta
+from datetime import datetime as dt, timedelta,timezone
 import urllib,os
 from bs4 import BeautifulSoup as bs
 from radiospectra.spectrogram import Spectrogram
 import matplotlib.pyplot as plt
 from aiapy.calibrate import register, update_pointing
 from sunpy.map import Map
+import pandas as pd
+import ssl
+
+ssl._create_default_https_context = ssl._create_unverified_context
 
 ### MWA obs query for a few date times
 def MWAavail(sT,DT=30,outfold='./'):
@@ -34,7 +38,7 @@ def MWAavail(sT,DT=30,outfold='./'):
 		res=pd.read_html('http://ws.mwatelescope.org/metadata/find/?search=search&html=1&pagesize=100&dataquality=1&notdeleted=on&delete_id=&min_total_tiles=&max_total_tiles=&min_good_tiles=&max_bad_tiles=&projectid=G0002&groupid=&obsname=&creator=&mintime=&maxtime=&mintime_utc='+ST+'&maxtime_utc='+ET+'&minduration=&minra=&maxra=&mindec=&maxdec=&mingal_long=&maxgal_long=&mingal_lat=&maxgal_lat=&minel=&maxel=&minaz=&maxaz=&gridpoint=&minlst=&maxlst=&minsunel=&maxsunel=&minsunpd=&maxsunpd=&mode=&cenchan=&anychan=&freq_res=&int_time=&minfiles=&contigfreq=')
 		taBl=res[0]
 		pickle.dump(taBl,open(outfold+sT.replace(':','')+'-'+eT.replace(':','')+'_MWAobsIDs.p','wb'))		
-#		pickle.dump(taBl,open('MWA_obsIDs/'+sT+'-'+eT+'_MWAobsIDs.p','wb'))
+		#pickle.dump(taBl,open('MWA_obsIDs/'+sT+'-'+eT+'_MWAobsIDs.p','wb'))
 		print('MWA Obs found with ',len(taBl),' IDs saved to ',sT+'-'+eT+'_MWAobsIDs.p')
 		return True
 	except:
@@ -48,12 +52,19 @@ def find_norp(sT,eT,outdir='./',plot=True):
 	outdir is the path to directory where to store the light curve and quick look image data files
 	plot =True ensures the data will be plotted for the sT to eT period
 	'''
+	from astropy.io import fits
+	import urllib.request
+	from matplotlib.dates import DateFormatter
 	dtFmt=DateFormatter('%b-%d %H:%M')
 	baseurl='https://solar.nro.nao.ac.jp/norp/fits/'
 	sT=np.datetime64(sT)
 	eT=np.datetime64(eT)
-	dates=np.arange(sT,eT,np.timedelta64(24,'h'))
-	chkdts=[str(dates[0]-np.timedelta64(24,'h')).split('T')[0].replace('-','/')]+[str(i).split('T')[0].replace('-','/') for i in dates]+[str(dates[-1]+np.timedelta64(24,'h')).split('T')[0].replace('-','/')]		
+	if np.isnat(sT) or np.isnat(eT) or eT<=sT:
+		raise ValueError('eT must be later than sT; both must be valid UTC times.')
+	outdir=os.path.join(os.fspath(outdir),'')
+	dates=np.arange(sT.astype('datetime64[D]')-np.timedelta64(1,'D'),
+		eT.astype('datetime64[D]')+np.timedelta64(2,'D'),np.timedelta64(1,'D'))
+	chkdts=[str(i).replace('-','/') for i in dates]
 	urls=[baseurl+i[:-2]+'norp'+i[2:].replace('/','')+'.fits.gz' for i in chkdts]
 	## Expected frequencies
 	subdir=str(sT+(eT-sT)/2).replace(':','')+'/'
@@ -63,8 +74,19 @@ def find_norp(sT,eT,outdir='./',plot=True):
 	print('Flare time: ',Flrtim)
 	print('###################################################\n')
 
-	if not os.path.isdir(outdir+subdir):
-		os.mkdir(outdir+subdir)
+	os.makedirs(outdir+subdir,exist_ok=True)
+	#### Check completed outputs before downloads or FITS reads ####
+	cache=outdir+subdir+'MaxFlux_'+str(sT).replace(':','')+'-'+str(eT).replace(':','')+'.csv'
+	if os.path.isfile(cache):
+		if plot==False:
+			print('Analysis already completed for the event:',Flrtim)
+			return
+		Frqs=pd.read_csv(cache,usecols=['Frequency (GHz)'])['Frequency (GHz)'].to_numpy()
+		getall=[outdir+subdir+'Flux_'+str(int(np.round(float(fq),0)))+'GHz_'+str(sT).replace(':','').replace('-','')+'-'+str(eT).replace(':','').replace('-','')+'.png' for fq in Frqs]
+		if len(getall)>0 and all(os.path.isfile(i) for i in getall):
+			print('Analysis and all plots already present! Skipping FITS reads and downloads.')
+			return
+	###############################################################
 	badurls=[]	
 	for url in urls:
 		####### Checking existing downloaded material and analysis
@@ -73,10 +95,11 @@ def find_norp(sT,eT,outdir='./',plot=True):
 			if plot==True and len(glob.glob(outdir+subdir+'*.png'))>0:
 				print('Plots also present!! So continuing to next url!')
 				continue
-		########################################################						
-
+		########################################################
 		print('Data searching in : ',url,'\nFor flare time: ',Flrtim)
-		fil=outdir+url.split('/')[-1]
+		fil=outdir+subdir+url.split('/')[-1]
+		if not os.path.isfile(fil):
+			fil=outdir+url.split('/')[-1]
 		if not os.path.isfile(fil):
 			try:
 				urllib.request.urlretrieve(url,fil)
@@ -89,12 +112,10 @@ def find_norp(sT,eT,outdir='./',plot=True):
 		beg=np.datetime64(head['DATE-BEG'])
 		End=np.datetime64(head['DATE-END'])
 		if beg>eT: # If Obs begin date time > End date time req. by user then break the loop 
-			os.system('rm -rf '+fil)
 			break
 		if End<sT: # If Obs end date time < Start epoch requested then check the next file
-			os.system('rm -rf '+fil)
 			continue	
-		if (beg<sT and End<eT) or (beg<sT and End>eT) or (beg>sT and End>eT) or (beg>sT and End<eT):
+		if beg<=eT and End>=sT:
 			print('Data found at ',url,';   Flare:',Flrtim)
 			data=fits.getdata(fil)
 			Time=data['Time'][0]		
@@ -105,31 +126,23 @@ def find_norp(sT,eT,outdir='./',plot=True):
 			frq_dict=dict(zip(Frqs,Alltags))
 
 			idlst = dt(1979, 1, 1, hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-			times=[dt.fromtimestamp(idlst.timestamp()+i,timezone.utc) for i in Time]
-			times=np.array(times).astype(np.datetime64)
+			times=[dt.fromtimestamp(idlst.timestamp()+i,timezone.utc).replace(tzinfo=None) for i in Time]
+			times=np.array(times,dtype='datetime64[us]')
+			if not np.any((times>=sT)&(times<=eT)):
+				continue
 			t1=sT if sT>times[0] else times[0]
 			t2=eT if times[-1]>eT else times[-1]
 
 			if os.path.isfile(outdir+subdir+'MaxFlux_'+str(t1).replace(':','')+'-'+str(t2).replace(':','')+'.csv'):
-				rev_d=dict(zip(Alltags,Frqs))
 				print('Analysis completed for the event: ',Flrtim)
-				## Check if all plots for the period are there
 				if plot==True:
-					getall=len(glob.glob(outdir+subdir+'Flux*_'+str(t1).replace(':','').replace('-','')+'-'+str(t2).replace(':','').replace('-','')+'.png'))
-					if len(getall)==len(Frqs):
-						print('All plots are in place for flare within',sT,' - ' ,eT,' So doing next time slot!! ')
-						os.system('rm -rf '+fil)
+					getall=[outdir+subdir+'Flux'+tag+'_'+str(t1).replace(':','').replace('-','')+'-'+str(t2).replace(':','').replace('-','')+'.png' for tag in Alltags]
+					if all(os.path.isfile(i) for i in getall):
+						print('All plots are in place for flare within',sT,' - ',eT,' So doing next time slot!! ')
 						continue
-					elif len(getall)>0:
-						print('Not all frequency LC made for ',t1,' - ',t2,' range.')
-						btags=['_'+str(int(np.round(float(i),0)))+'GHz' for i in Frqs]
-						gtags=[i.split('GHz_')[0].replace('Flux_','')+'GHz_' for i in getall]
-						Alltags=list(set(btags)-set(gtags))
-						Frqs=[rev_d[i] for i in Alltags]
-						frq_dict=dict(zip(Frqs,Alltags))
-						print('Undone frequency range: ',frq_dict)
-																			 							
-			l1,l2=np.where(times<=t1)[0][-1],np.where(times>=t2)[0][0]
+					print('Not all frequency LC made; recomputing all frequencies to retain the full summary.')
+
+			l1,l2=np.where(times>=t1)[0][0],np.where(times<=t2)[0][-1]
 			IFlxs=[]
 			VFlxs=[]
 			VMxt=[]
@@ -145,7 +158,7 @@ def find_norp(sT,eT,outdir='./',plot=True):
 			for fq,tag in frq_dict.items():
 				Flx_I=data['CalI'+tag][0]*data['Dval'+tag][0]
 				Flx_V=data['CalV'+tag][0]*data['Dval'+tag][0]
-				Flx_P=Flx_V/Flx_I
+				Flx_P=np.divide(Flx_V,Flx_I,out=np.full(Flx_I.shape,np.nan),where=np.isfinite(Flx_I)&np.isfinite(Flx_V)&(Flx_I!=0))
 				
 				## Flux estimation
 				Im=np.nanmax(Flx_I[l1:l2+1])
@@ -191,7 +204,7 @@ def find_norp(sT,eT,outdir='./',plot=True):
 					if len(Flocs)>0:
 						FI=times[l1:l2+1][Flocs]
 						Ivl=[FI[0],FI[-1]]	# Will mark vertical period for flare flux estimation
-						Idur=(FI[-1]-FI[0]).astype(float)/60*10**-6
+						Idur=(FI[-1]-FI[0])/np.timedelta64(1,'m')
 						TI=np.nansum(Flx_I[l1:l2+1][Flocs])*DelT # Estimating total flare I flux
 						if tog_V==True:
 							TV=np.nansum(Flx_V[l1:l2+1][Flocs])*DelT # Estimating total flare V flux										
@@ -199,7 +212,9 @@ def find_norp(sT,eT,outdir='./',plot=True):
 					IMxt+=['---']
 					nIm+=[np.nan]
 				if tog_V==True:
-					y1,y2=np.round(np.nanmin(Flx_V[l1:l2+1])*0.9)-1,np.round(Vm*1.1)+1
+					y1,y2=np.nanmin(Flx_V[l1:l2+1]),Vm
+					pad=max((y2-y1)*0.1,1.)
+					y1,y2=y1-pad,y2+pad
 					Vpls=np.where(Flx_V[l1:l2+1]==Vm)[0]
 					VMxt+=[str(times[l1:l2+1][Vpls[0]]).replace('T',' ')]
 					nVm+=[len(Vpls)]
@@ -244,15 +259,13 @@ def find_norp(sT,eT,outdir='./',plot=True):
 					plt.savefig(outdir+subdir+'Flux'+tag+'_'+str(t1).replace(':','').replace('-','')+'-'+str(t2).replace(':','').replace('-','')+'.png')
 					plt.close()
 				
-				if tog_V==True:
-					Vpls=np.where(Flx_V[l1:l2+1]==Vm)[0]
-					VMxt+=[str(times[l1:l2+1][Vpls[0]]).replace('T',' ')]
 				pickle.dump({'Time':times,'Flux_I':Flx_I,'Flux_V':Flx_V,'Flux V/I':Flx_P,'Start time':t1,'End time':t2,'I Flux range':[Iy1,Iy2],'V Flux range':[y1,y2]},open(outdir+subdir+'FluxLC'+tag+'_'+str(t1).replace(':','')+'-'+str(t2).replace(':','')+'.p','wb'))			
 
-			os.system('mv '+fil+' '+outdir+subdir)
+			if os.path.abspath(fil)!=os.path.abspath(outdir+subdir+os.path.basename(fil)):
+				os.replace(fil,outdir+subdir+os.path.basename(fil))
 			IFlxs=np.array(IFlxs)
 			VFlxs=np.array(VFlxs)
-			DF=pd.DataFrame({'Frequency (GHz)':Frqs,'Median_I_flux (SFU)':Imed,'Median_V_flux (SFU)':Vmed,'Max_I_flux (SFU)':IFlxs,'Max_V_flux (SFU)':VFlxs,'Max Pol':VFlxs/IFlxs,'Max_to_median_I (SFU)':IFlxs/np.array(Imed),'Max_to_median_V (SFU)':VFlxs/np.array(Vmed),'Max_I_time (UT)':IMxt,'Max_V_time (UT)':IMxt,'Max_I_repetition':nIm,'Max_V_repetition':nVm,'Flare_Energy_I (SFU s)':TotI,'Flare_Energy_V (SFU s)':TotV,'Mean pol':np.array(TotV)/np.array(TotI)})
+			DF=pd.DataFrame({'Frequency (GHz)':Frqs,'Median_I_flux (SFU)':Imed,'Median_V_flux (SFU)':Vmed,'Max_I_flux (SFU)':IFlxs,'Max_V_flux (SFU)':VFlxs,'Max Pol':VFlxs/IFlxs,'Max_to_median_I (SFU)':IFlxs/np.array(Imed),'Max_to_median_V (SFU)':VFlxs/np.array(Vmed),'Max_I_time (UT)':IMxt,'Max_V_time (UT)':VMxt,'Max_I_repetition':nIm,'Max_V_repetition':nVm,'Flare_Energy_I (SFU s)':TotI,'Flare_Energy_V (SFU s)':TotV,'Mean pol':np.array(TotV)/np.array(TotI)})
 			DF=DF.astype(str)
 			DF.to_excel(outdir+subdir+'MaxFlux_'+str(t1).replace(':','')+'-'+str(t2).replace(':','')+'.xlsx',index=False)
 			DF.to_csv(outdir+subdir+'MaxFlux_'+str(t1).replace(':','')+'-'+str(t2).replace(':','')+'.csv',index=False)
@@ -269,167 +282,243 @@ def get_norh_imgs(sT,eT,outdir='./'):
 	outdir is where to save the images
 		
 	'''
+	from astropy.io import fits
+	import urllib.request
+	if np.datetime64(eT)<=np.datetime64(sT):
+		raise ValueError('eT must be later than sT.')
+	outdir=os.path.abspath(outdir)
+	os.makedirs(outdir,exist_ok=True)
 	cwd=os.getcwd()
 	os.chdir(outdir)
-	baseurl='https://solar.nro.nao.ac.jp/norh/fits/3min/'
-	if np.datetime64(sT)<np.datetime64(sT.split('T')[0]+'T06:26:05'):
-		YR=sT.split('T')[0].replace('-','/')
-	else:
-		YR=eT.split('T')[0].replace('-','/')
+	try:
+		baseurl='https://solar.nro.nao.ac.jp/norh/fits/3min/'
+		if np.datetime64(sT)<np.datetime64(sT.split('T')[0]+'T06:26:05'):
+			YR=sT.split('T')[0].replace('-','/')
+		else:
+			YR=eT.split('T')[0].replace('-','/')
 			
-	URL=baseurl+YR+'/'
-	req=urllib.request.urlopen(URL)
-	links=bs(req).find_all('a',href=True)
-	dtims=[]
-	lnks=[]
-	for ln in links:
-		if '.gz' not in ln.get('href'):
-			continue
-		if 'ifs' in ln.get('href'):
-			continue	
-		lnk=ln.get('href')
-		lnks+=[lnk]
-		Dtime=lnk.replace('ifa',sT[0:2]).split('.')[0]
+		URL=baseurl+YR+'/'
+		req=urllib.request.urlopen(URL)
+		links=bs(req).find_all('a',href=True)
+		dtims=[]
+		lnks=[]
+		for ln in links:
+			if '.gz' not in ln.get('href'):
+				continue
+			if 'ifs' in ln.get('href'):
+				continue	
+			lnk=ln.get('href')
+			lnks+=[lnk]
+			Dtime=lnk.replace('ifa',sT[0:2]).split('.')[0]
 		
-		dtims+=[np.datetime64(dt.strptime(Dtime,'%Y%m%d_%H%M%S'))]
-	dtims=np.array(dtims)
-	try:
-		p1=np.where(dtims<np.datetime64(sT))[0][-1]
-	except:
-		p1=0	
-	try:
-		p2=np.where(dtims>np.datetime64(eT))[0][0]
-	except:
-		p2=len(lnks)-1
+			dtims+=[np.datetime64(dt.strptime(Dtime,'%Y%m%d_%H%M%S'))]
+		dtims=np.array(dtims)
+		if len(dtims)==0:
+			print('No NoRH images found:',URL)
+			return
+		order=np.argsort(dtims)
+		dtims=dtims[order]
+		lnks=[lnks[i] for i in order]
+		try:
+			p1=np.where(dtims<np.datetime64(sT))[0][-1]
+		except:
+			p1=0	
+		try:
+			p2=np.where(dtims>np.datetime64(eT))[0][0]
+		except:
+			p2=len(lnks)-1
 			
-	for i in np.arange(p1,p2+1):
-		if not os.path.isfile(lnks[i]):
-			urllib.request.urlretrieve(URL+lnks[i],lnks[i])
-
-		if not os.path.isfile(lnks[i].replace('ifa','ifs')):
-			urllib.request.urlretrieve(URL+lnks[i].replace('ifa','ifs'),lnks[i].replace('ifa','ifs'))
-
-		for img in [lnks[i],lnks[i].replace('ifa','ifs')]:
-			try:
-				data,header=fits.getdata(img,header=True)
-				plt.figure(figsize=(8.5,7),dpi=90)
-				polz='STOKES I' if header['POLARIZ']=='r+l' else 'STOKES V'
-				dx=header['CDELT1']
-				dy=header['CDELT2']
-				edg=data.shape[0]/2+0.5
-				x1=np.round(edg*dx/60,1)
-				y1=np.round(edg*dy/60,1)
-				extent=[-x1,x1,-y1,y1]
-				if 'ifa' in img:
-					data=np.ma.masked_less_equal(data,1000)
-				data=data+np.abs(data.min())
-				plt.imshow(np.log10(data),aspect='auto',extent=extent,origin='lower',cmap='gist_heat')
-				h=plt.colorbar()
-				h.set_label(r'$\mathrm{log_{10}T_B\ (K)}$',size=17)
-				h.ax.tick_params(labelsize=16)
-				plt.xlabel('X [arcmin]',size=16)
-				plt.ylabel('Y [arcmin]',size=16)
-				plt.xticks(size=16)
-				plt.yticks(size=16)
-				plt.title(header['DATE-OBS']+' '+header['TIME-OBS'].split('.')[0]+'  ('+polz+')',size=17)
-				plt.tight_layout()
-				plt.savefig(img.split('.')[0]+'.png')
-				plt.savefig(img.split('.')[0]+'.pdf')
-				plt.close()		
-				print('Image saved :',outdir+'/'+img.split('.')[0]+'.png')
-			except:
-				print('Downloaded fits have issue :',outdir+'/'+img)
+		for i in np.arange(p1,p2+1):
+			for img in [lnks[i],lnks[i].replace('ifa','ifs')]:
+				#### Validate cached FITS; retry incomplete or failed downloads ####
+				for attempt in range(2):
+					try:
+						if attempt==0 and os.path.isfile(img):
+							data,header=fits.getdata(img,header=True)
+						else:
+							urllib.request.urlretrieve(URL+img,img+'.part')
+							data,header=fits.getdata(img+'.part',header=True)
+							os.replace(img+'.part',img)
+						break
+					except Exception as err:
+						if os.path.isfile(img+'.part'):
+							os.remove(img+'.part')
+						print('Could not read/download NoRH FITS:',img,';',err)
+				else:
+					continue
+				try:
+					plt.figure(figsize=(8.5,7),dpi=90)
+					polz='STOKES I' if header['POLARIZ']=='r+l' else 'STOKES V'
+					dx=header['CDELT1']
+					dy=header['CDELT2']
+					edg=data.shape[0]/2+0.5
+					x1=np.round(edg*dx/60,1)
+					y1=np.round(edg*dy/60,1)
+					extent=[-x1,x1,-y1,y1]
+					if polz=='STOKES I':
+						data=np.ma.masked_less_equal(data,1000)
+						plt.imshow(np.ma.log10(data),aspect='auto',extent=extent,origin='lower',cmap='gist_heat')
+						h=plt.colorbar()
+						h.set_label(r'$\mathrm{log_{10}T_B\ (K)}$',size=17)
+					else:
+						vmax=np.nanmax(np.abs(data))
+						if not np.isfinite(vmax) or vmax==0:
+							vmax=1.
+						plt.imshow(data,aspect='auto',extent=extent,origin='lower',cmap='RdBu_r',vmin=-vmax,vmax=vmax)
+						h=plt.colorbar()
+						h.set_label(r'$\mathrm{T_B\ (K)}$',size=17)
+					h.ax.tick_params(labelsize=16)
+					plt.xlabel('X [arcmin]',size=16)
+					plt.ylabel('Y [arcmin]',size=16)
+					plt.xticks(size=16)
+					plt.yticks(size=16)
+					plt.title(header['DATE-OBS']+' '+header['TIME-OBS'].split('.')[0]+'  ('+polz+')',size=17)
+					plt.tight_layout()
+					plt.savefig(img.split('.')[0]+'.png')
+					plt.savefig(img.split('.')[0]+'.pdf')
+					plt.close()		
+					print('Image saved :',outdir+'/'+img.split('.')[0]+'.png')
+				except Exception as err:
+					print('NoRH plotting failed:',outdir+'/'+img,';',err)
+				finally:
+					plt.close()
 						
-	os.chdir(cwd)
-	
-############### Find the HESSI flare from flare cat for the period #############
+	finally:
+		os.chdir(cwd)
 
+############### Find the HESSI flare from flare cat for the period #############
 def find_flare(sT,eT,flare_cat="hessi_flare_catalog.csv"):
 	'''
-	Flare that starts after sT and ends before eT are chosen
-	INPUT
-	-----
-	sT is the datetime string of the event 'YYYY-MM-DDThh:mm:ss'.
-	eT is the end datetime string of the event 'YYYY-MM-DDThh:mm:ss'.
-	flare_cat is the full path to RHESSI flare catalog. Used when flare number isnt passed by user.
-	
+	Return IDs and catalogue rows for flares starting after sT
+	and ending before eT.
+
+	sT, eT: UTC strings 'YYYY-MM-DDThh:mm:ss'.
+	flare_cat: CSV or pickled Astropy Table.
 	'''
-	if '.p' in flare_cat: 
-		flcat=pickle.load(open(flare_cat,'rb'))
-	elif '.csv' in flare_cat:
-		flcat=Table.read(flare_cat,format='ascii.csv')
 	stc=dt.strptime(sT,'%Y-%m-%dT%H:%M:%S')
 	etc=dt.strptime(eT,'%Y-%m-%dT%H:%M:%S')
-	st_y=dt.strftime(stc,'%d-%b-%Y')
-	dts=flcat['Date'].data
-	goods=np.where(dts==st_y)[0]
-	sTab=flcat[goods]
-	tst=[dt.strptime(sTab[i]['Date']+' '+sTab[i]['Start time'],'%d-%b-%Y %H:%M:%S') for i in range(len(sTab))]
-	tend=[dt.strptime(sTab[i]['Date']+' '+sTab[i]['End time'],'%d-%b-%Y %H:%M:%S') for i in range(len(sTab))]
-	tst=np.array(tst)
-	tend=np.array(tst)
-	l1=np.where(tst>stc)[0][0]
-	l2=np.where(tend<etc)[0][-1]
-	fnums,Tab=sTab['ID'][l1:l2+1].data,sTab[l1:l2+1]
-	
-	return IDs,Tab
-	
-##### Download RHESSI summary data #####
-def find_RHESSI(sT,eT,outdir='./',flare_cat="hessi_flare_catalog.csv",baseurl='https://data.darts.isas.jaxa.jp/pub/mirror/rhessi/'):
-	'''
-	Go to RHESSI browser and get the flare num to let the code download the image for the flare
-	INPUT
-	-----
-	sT is the datetime string of the event 'YYYY-MM-DDThh:mm:ss'.
-	eT is the end datetime string of the event 'YYYY-MM-DDThh:mm:ss'.
-	outdir is the path to directory where to store the light curve and quick look image data files
-	baseurl is the address the the directory of RHESSI images. Now mirror japanese site is set as default.
-	flare_cat is the full path to RHESSI flare catalog Table - either '.csv' or python pickle format made using. Used to find flare number isnt passed by user.
-				flare_Cat can be either csv or pickle file with astropy Table.
-	'''
-	IDs,Tab=find_flare_hessi(sT,eT,flare_cat)
-	Tab.write(outdir+'RHESSI_flare'+ID+'_'+sT.replace('-','').replace(':','')+'.csv',format='ascii.csv')
-	if baseurl[-1]!='/':
-		baseurl+='/'
-	
-	YR=sT.split('T')[0]
-	fsl=YR.replace('-','/')+'/'
-	cwd=os.getcwd()
-	os.chdir(outdir)
-	if not os.path.isdir(RHESSI_QLimgs):
-		os.mkdir('RHESSI_QLimgs/')
-	hrs=(np.datetime64(sT)-np.datetime64(sT.split('T')[0]+'T00:00:00')).astype('timedelta64[s]').astype(float)/3600
-	orb=[str(int(np.floor(hrs/24.*15))).zfill(2),str(int(np.ceil(hrs/24.*15))).zfill(2)]
+	if etc<=stc:
+		raise ValueError('eT must be later than sT.')
 
-	LNK='http://sprg.ssl.berkeley.edu/~shilaire/rhessi/osp/'+fsl
-	for i in orb:
-		IMG=sT.split('T')[0].replace('-','')+'_'+i+'A.png'
-		urllib.request.urlretrieve(LNK+IMG,'RHESSI_QLimgs/'+IMG)
+	ext=os.path.splitext(os.fspath(flare_cat))[1].lower()
+	if ext in ('.p','.pkl','.pickle'):
+		with open(flare_cat,'rb') as fil:
+			flcat=pickle.load(fil)
+	elif ext=='.csv':
+		flcat=Table.read(flare_cat,format='ascii.csv')
+	else:
+		raise ValueError('flare_cat must be a CSV or pickle file.')
+
+	#### Select candidate dates ####
+	days=[(stc+timedelta(days=i)).strftime('%d-%b-%Y')
+		for i in range((etc.date()-stc.date()).days+1)]
+	sTab=flcat[np.isin(flcat['Date'],days)]
+
+	#### Get start and end times, including midnight crossings ####
+	tst=[]
+	tend=[]
+	for row in sTab:
+		start=dt.strptime(str(row['Date'])+' '+str(row['Start time']),
+			'%d-%b-%Y %H:%M:%S')
+		end=dt.strptime(str(row['Date'])+' '+str(row['End time']),
+			'%d-%b-%Y %H:%M:%S')
+		if end<start:
+			end+=timedelta(days=1)
+		tst.append(start)
+		tend.append(end)
+
+	#### Select fully contained flares and sort chronologically ####
+	tst=np.array(tst,dtype=object)
+	tend=np.array(tend,dtype=object)
+	goods=(tst>stc)&(tend<etc)
+	Tab=sTab[goods][np.argsort(tst[goods])]
+	IDs=np.asarray(Tab['ID']).copy()
+
+	return IDs,Tab
+
+
+##### Download RHESSI summary data #####
+
+def find_RHESSI(sT,eT,outdir='./',flare_cat="hessi_flare_catalog.csv", baseurl='https://data.darts.isas.jaxa.jp/pub/mirror/rhessi/'):
 	'''
-	flag=[0,0]
-	i=0
-	for ID in IDs:
-		try:
-			fsimg=urllib.request.urlretrieve(baseurl+'metadata/qlook_image_plot/'+fsl+'hsi_fsimg_'+ID+'.png','RHESSI_QLimgs/'+'hsi_fsimg_'+ID+'.png')
-			print(fsl,' Full sun first look image saved!!')
-			flag[i]=1
-		except:
-			print('hsi_fsimg_'+ID+'.png not found!!')
-		i+=1
-	'''	
-	
-	br_urls=['metadata/qlook_image_plot/']
-	for burl in br_urls:
-		req=urllib.request.urlopen(baseurl+burl+fsl)
-		links=bs(req).find_all('a',href=True)
-		IDs=IDs.astype(str)
-		for ln in links:
-			for ID in IDs:
-				if ID in ln.get('href'):
-					urllib.request.urlretrieve(baseurl+burl+fsl+ln.get('href'),'RHESSI_QLimgs/'+ln.get('href'))
-					print('Image data found!! ',ln.get('href'))
-					break
-	os.chdir(cwd)			
+	Save the selected flare catalogue and matching RHESSI quicklook files.
+
+	sT, eT: UTC strings 'YYYY-MM-DDThh:mm:ss'.
+	outdir: output directory.
+	flare_cat: CSV or pickled Astropy Table.
+	baseurl: RHESSI mirror root.
+
+	Also download available daily orbit A.png panels.
+	These panels cover whole days, rather than precisely sT to eT.
+	Returns IDs, Tab. Failed requests are printed.
+	'''
+	import re,shutil,urllib.request
+	from urllib.parse import urljoin,urlsplit
+
+	IDs,Tab=find_flare(sT,eT,flare_cat)
+	outdir=os.path.abspath(outdir)
+	imgdir=os.path.join(outdir,'RHESSI_QLimgs')
+	os.makedirs(imgdir,exist_ok=True)
+
+	tag=sT.replace('-','').replace(':','')+'_'+eT.replace('-','').replace(':','')
+	Tab.write(os.path.join(outdir,'RHESSI_flares_'+tag+'.csv'),
+		format='ascii.csv',overwrite=True)
+	print('Selected flares:',len(IDs))
+
+	stc=dt.strptime(sT,'%Y-%m-%dT%H:%M:%S')
+	etc=dt.strptime(eT,'%Y-%m-%dT%H:%M:%S')
+
+	#### Find actual archive filenames for each day ####
+	for i in range((etc.date()-stc.date()).days+1):
+		day=stc+timedelta(days=i)
+		fsl=day.strftime('%Y/%m/%d/')
+		dayIDs=[str(v) for v in
+			Tab['ID'][Tab['Date']==day.strftime('%d-%b-%Y')]]
+
+		listings=[('orbit',
+			'http://sprg.ssl.berkeley.edu/~shilaire/rhessi/osp/'+fsl)]
+		if dayIDs:
+			listings.append(('flare',
+				baseurl.rstrip('/')+'/metadata/qlook_image_plot/'+fsl))
+
+		for kind,LNK in listings:
+			try:
+				with urllib.request.urlopen(LNK,timeout=30) as req:
+					links=bs(req.read(),'html.parser').find_all('a',href=True)
+			except OSError as err:
+				print('Could not read archive:',LNK,'\n',err)
+				continue
+
+			seen=set()
+			for ln in links:
+				url=urljoin(LNK,ln['href'])
+				name=os.path.basename(urlsplit(url).path)
+
+				if kind=='orbit':
+					match=(name.startswith(day.strftime('%Y%m%d')+'_')
+						and name.endswith('A.png'))
+				else:
+					match=any(re.search(r'(?<!\d)'+re.escape(ID)+r'(?!\d)',
+						name) for ID in dayIDs)
+
+				if not match or not name or url in seen or ln['href'].endswith('/'):
+					continue
+				seen.add(url)
+				path=os.path.join(imgdir,name)
+
+				#### Download to a temporary file before replacing output ####
+				try:
+					with urllib.request.urlopen(url,timeout=60) as req, \
+						open(path+'.part','wb') as fil:
+						shutil.copyfileobj(req,fil)
+					os.replace(path+'.part',path)
+					print('Saved:',path)
+				except OSError as err:
+					if os.path.exists(path+'.part'):
+						os.remove(path+'.part')
+					print('Download failed:',url,'\n',err)
+
+	return IDs,Tab
 
 ######### Find otherwave coobs
 def find_coobs(sT,eT,instrs,wvs,outdir='./',RHESSI_flarecat="hessi_flare_catalog.csv",downdata=False):
@@ -541,7 +630,8 @@ def find_coobs(sT,eT,instrs,wvs,outdir='./',RHESSI_flarecat="hessi_flare_catalog
 							tres=str(24/len(Tab)*3600).split('.')[0]+'s'
 							rng=dat.time.value[0].replace('-','').replace(' ','T').replace(':','').split('.')[0]+'-'+dat.time.value[0].replace('-','').replace(' ','T').replace(':','').split('.')[0]
 							pickle.dump(Tab,open(Obs+'_'+rng+'_'+tres+'.p','wb'))
-							Tab.write(Obs+'_'+rng+'_'+tres+'.csv',format='ascii.csv')				
+							Tab=Tab.to_pandas()
+							Tab.to_csv(Obs+'_'+rng+'_'+tres+'.csv',index=False)				
 					os.chdir(bdir)
 			continue
 		else:
@@ -589,6 +679,90 @@ def radspec_to_pickle(filname,outdir='./'):
 	spec.plot()
 	plt.savefig(outdir+specfil+'ng')
 	plt.close()
+
+#### Download and plot SXR lightcurve and its derivative
+
+def plot_goes_derivative(sT, eT, satellite=None,savedata=True,outdir='./'):
+	'''
+	Download and plot GOES 1–8 Å flux and its time derivative.
+	sT, eT: UTC datetime strings or datetime objects.
+	satellite: GOES number; None selects the highest available number.
+	savedata: True or False. To save data in the outdir
+	'''
+	nametag=sT.replace('-','').replace(':','')+'-'+eT.replace('-','').replace(':','')
+	if isinstance(sT, str):
+		sT = dt.fromisoformat(sT)
+	if isinstance(eT, str):
+		eT = dt.fromisoformat(eT)
+	if eT <= sT:
+		raise ValueError('eT must be later than sT.')
+
+	#### Download data ####
+	print('Fetching GOES X-ray data...')
+	query = [a.Time(sT, eT), a.Instrument('XRS'), a.Resolution('flx1s')]
+	if satellite is not None:
+		query.append(a.goes.SatelliteNumber(int(satellite)))
+	results = Fido.search(*query)
+
+	if results.file_num == 0:
+		raise ValueError('No GOES XRS data found for this interval.')
+
+	records = results['xrs']
+	if satellite is None:
+		satellite = max(int(v) for v in records['SatelliteNumber'])
+		records = records[np.asarray(records['SatelliteNumber'], dtype=int) == satellite]
+	print('Using GOES-' + str(satellite))
+
+	downloaded = Fido.fetch(records)
+	if downloaded.errors:
+		raise RuntimeError('Some GOES downloads failed: ' + str(downloaded.errors))
+	if len(downloaded) == 0:
+		raise ValueError('No GOES files downloaded.')
+
+	#### Read and restrict to requested interval ####
+	goes_ts = ts.TimeSeries(downloaded, source='XRS', concatenate=True)
+	goes_ts = goes_ts.truncate(sT, eT)
+	data = goes_ts.to_dataframe().sort_index()
+	data = data.loc[~data.index.duplicated(keep='first')]
+
+	if len(data) < 2:
+		raise ValueError('At least two samples are needed within the interval.')
+
+	times = data.index
+	flux_values = data['xrsb'].to_numpy(dtype=float)
+	flux_values *= goes_ts.units['xrsb'].to(u.W/u.m**2)
+	
+	#### Derivative using actual sampling intervals ####
+	time_steps = (times[1:] - times[:-1]).total_seconds().to_numpy()
+	derivative = np.diff(flux_values) / time_steps
+	derivative_times = times[:-1] + (times[1:] - times[:-1]) / 2
+	
+	if savedata==True:
+		pickle.dump({'Time':times,'Flux':flux_values,'(Time,Derivative)':(derivative_times,derivative)},open(outdir+'GOES_data_deriv_'+nametag+'.p','rb'))
+
+	#### Plot ####
+	fig, ax = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+	ax[0].plot(times, np.where(flux_values > 0, flux_values, np.nan),
+		label='GOES-' + str(satellite) + ' 1–8 Å', color='tab:blue')
+	ax[0].set_ylabel('Flux (W/m²)')
+	ax[0].set_yscale('log')
+	ax[0].legend()
+	ax[0].grid(True, which='both')
+
+	ax[1].plot(derivative_times, derivative, label='Derivative', color='tab:red')
+	ax[1].set_ylabel('dFlux/dt (W/m²/s)')
+	ax[1].set_xlabel('Time (UTC)')
+	ax[1].legend()
+	ax[1].grid(True)
+
+	fig.tight_layout()
+	plt.savefig(outdir+'GOES_data_deriv_'+nametag+'.pdf')
+	plt.close()
+	return
+	
+
+# Example usage:
+# plot_goes_derivative("2025-08-10 00:00", "2025-08-10 02:00")
 
 ###### Get RSTN spectrograph selected dates ####
 def get_RSTN(sT,eT,instrs='',callisto='',outdir='./',downdata=True):
@@ -687,13 +861,14 @@ def get_DHband_DS(dT,outdir='./',delta_t=30):
 	nlinks=[]
 	tims=[]
 	gtim=np.nan
-	
+	if not os.path.isdir(outdir):
+		os.mkdir(outdir)
 	if not os.path.isdir(outdir+'Wind/'):
 		os.mkdir(outdir+'Wind/')
 	
 	try:
 		req=urllib.request.urlopen(tmpl)
-		links=bs(req).find_all('a',href=True)
+		links=bs(req,features="lxml").find_all('a',href=True)
 		for ln in links:
 			if "windwaves" not in ln.get("href"):
 				continue
@@ -739,7 +914,7 @@ def get_DHband_DS(dT,outdir='./',delta_t=30):
 	try:
 		print('Querrying....',tmpl)
 		req=urllib.request.urlopen(tmpl)
-		links=bs(req).find_all('a',href=True)
+		links=bs(req,features="lxml").find_all('a',href=True)
 		print('Web data extracted!!')
 		if SWu==SWAVES_png_url:
 			for ln in links:
