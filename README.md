@@ -56,10 +56,10 @@ This is the retrieval workhorse. Public functions can be imported independently,
 
 | Function | Inputs and behavior | Returns / saved products |
 |---|---|---|
-| `get_SDO_imgs(sT,eT,dT,instruments=...,waves=...,outdir='./SDO',nproc=4)` | Instrument list and matching list of product lists. AIA products are numeric wavelengths in Angstrom; HMI products are `magnetogram`, `continuum` or `dopplergram` (`None` selects magnetogram). Defaults request AIA 94/171/193 and HMI magnetogram/continuum. Downloads and AIA preparation are delegated to `find_coobs`. | A list of Map lists, one per instrument/product combination in input order. Finished FITS under `outdir/<instrument>/<product>/`; originals under each product's `raw_SDO/`. |
-| `get_LASCO_imgs(sT,eT,dT,instr,outdir='./LASCO_1',need_calib=False)` | `instr='C2'` or `'C3'`. Default prepares archive images as exposure-normalised, field-of-view-masked DN/s previews. With `need_calib=True`, tries verified Level-1/MSB FITS, then Helioviewer JP2, then archive DN/s. | Map list; originals in `raw/`, prepared FITS in `maps/`. JP2 is a display product, not MSB photometry. |
-| `calib_LASCO(images,instr=None,outdir='./LASCO_calibrated')` | Existing FITS path/Map or list/tuple. Verified Level-1/MSB passes through. Otherwise tries optional SolarSoft, remote Level-1, JP2 and finally an explicitly uncalibrated preview. Remote replacements must meet time/exposure checks. | Map or list matching input form; saved FITS/logs. Preserve original files referenced by `OV_RAW` for local calibration. |
-| `get_EIT_imgs(sT,eT,dT,wave,outdir='./EIT',archive_url=...)` | `wave=171,195,284,304`. Retrieves official preprocessed Level-1 products and rejects raw EIT substitutions. Optional archive URL must point to an equivalent archive. | Calibrated SunPy Maps and selected FITS. Availability and native cadence limit sampling. |
+| `get_SDO_imgs(sT,eT,dT,`<br>`instruments=...,waves=...,`<br>`outdir='./SDO',nproc=4)` | Instrument list and matching list of product lists. AIA products are numeric wavelengths in Angstrom; HMI products are `magnetogram`, `continuum` or `dopplergram` (`None` selects magnetogram). Defaults request AIA 94/171/193 and HMI magnetogram/continuum. Downloads and AIA preparation are delegated to `find_coobs`. | A list of Map lists, one per instrument/product combination in input order. Finished FITS under `outdir/<instrument>/<product>/`; originals under each product's `raw_SDO/`. |
+| `get_LASCO_imgs(sT,eT,dT,instr,`<br>`outdir='./LASCO_1',`<br>`need_calib=False)` | `instr='C2'` or `'C3'`. Default prepares archive images as exposure-normalised, field-of-view-masked DN/s previews. With `need_calib=True`, tries verified Level-1/MSB FITS, then Helioviewer JP2, then archive DN/s. | Map list; originals in `raw/`, prepared FITS in `maps/`. JP2 is a display product, not MSB photometry. |
+| `calib_LASCO(images,instr=None,`<br>`outdir='./LASCO_calibrated')` | Existing FITS path/Map or list/tuple. Verified Level-1/MSB passes through. Otherwise tries optional SolarSoft, remote Level-1, JP2 and finally an explicitly uncalibrated preview. Remote replacements must meet time/exposure checks. | Map or list matching input form; saved FITS/logs. Preserve original files referenced by `OV_RAW` for local calibration. |
+| `get_EIT_imgs(sT,eT,dT,wave,`<br>`outdir='./EIT',archive_url=...)` | `wave=171,195,284,304`. Retrieves official preprocessed Level-1 products and rejects raw EIT substitutions. Optional archive URL must point to an equivalent archive. | Calibrated SunPy Maps and selected FITS. Availability and native cadence limit sampling. |
 
 ```python
 import Multiwb_datamine as dm
@@ -78,13 +78,13 @@ if __name__=='__main__':
 
 | Function | Purpose and outputs |
 |---|---|
-| `get_norp_LC(sT,eT,outdir='./',plot=True)` | Downloads NoRP FITS and derives microwave Stokes-I/V light curves, polarization, peak summaries and flare quantities. Writes event-subfolder data, CSV/Excel/pickle summaries and optional figures. Returns `None`. |
+| `get_norp_LC(sT,eT,outdir='./',`<br>`plot=True)` | Downloads NoRP FITS and derives microwave Stokes-I/V light curves, polarization, peak summaries and flare quantities. Writes event-subfolder data, CSV/Excel/pickle summaries and optional figures. Returns `None`. |
 | `get_norh_imgs(sT,eT,outdir='./')` | Retrieves NoRH image products and saves quicklook plots. Returns `None`. |
-| `get_RSTN(sT,eT,outdir='./',downdata=True,plot=True)` | Attempts numerical Culgoora/Learmonth, e-CALLISTO and RSTN sources. Australian raw retrieval targets intervals overlapping 22–10 UT and uses the start-date filename convention. Archive quicklooks are a fallback when numerical files are unavailable. Returns paths, plots and errors. `downdata=False` reports candidates. |
-| `radspec_to_pickle(filname,outdir='./')` | Converts SRS/FITS spectrograms or e-CALLISTO DataFrame pickles into saved `.p` data and PNGs; returns both paths. DataFrame inputs retain that format. |
-| `plot_culgoora_spec(filename,outdir='./')` | Decodes raw `SPECYYMMDD.bz2` records using recorded timestamps and four bands spanning 18–1800 MHz. Saves spectrum/metadata pickle and PNG, returning both paths. Native amplitude codes are not calibrated SFU. |
-| `get_DHband_quicklookDS(sT,eT,outdir='./')` | Retrieves Wind/STEREO archive images and assembles available quicklook panels. These are visualization products, not numerical spectra. |
-| `get_DHband_calibDS(sT,eT,outdir='./',sats=('sta','stb','wind'),Ch_frq=1.0,stats='median',vmin=None,vmax=None)` | Downloads multi-day SPDF CDF data; uses STEREO L3 SFU and the supplied Wind Z-channel gain conversion. Produces dynamic spectra and nearest-channel light curves, recording the actual channel frequency. `Ch_frq` is MHz; `vmin/vmax` are log10(SFU) display limits. Returns paths/errors per spacecraft. |
+| `get_RSTN(sT,eT,outdir='./',`<br>`downdata=True,plot=True)` | Attempts numerical Culgoora/Learmonth, e-CALLISTO and RSTN sources. Australian raw retrieval targets intervals overlapping 22–10 UT and uses the start-date filename convention. Archive quicklooks are a fallback when numerical files are unavailable. Returns paths, plots and errors. `downdata=False` reports candidates. |
+| `radspec_to_pickle(filname,`<br>`outdir='./')` | Converts SRS/FITS spectrograms or e-CALLISTO DataFrame pickles into saved `.p` data and PNGs; returns both paths. DataFrame inputs retain that format. |
+| `plot_culgoora_spec(filename,`<br>`outdir='./')` | Decodes raw `SPECYYMMDD.bz2` records using recorded timestamps and four bands spanning 18–1800 MHz. Saves spectrum/metadata pickle and PNG, returning both paths. Native amplitude codes are not calibrated SFU. |
+| `get_DHband_quicklookDS(sT,eT,`<br>`outdir='./')` | Retrieves Wind/STEREO archive images and assembles available quicklook panels. These are visualization products, not numerical spectra. |
+| `get_DHband_calibDS(sT,eT,`<br>`outdir='./',`<br>`sats=('sta','stb','wind'),`<br>`Ch_frq=1.0,stats='median',`<br>`vmin=None,vmax=None)` | Downloads multi-day SPDF CDF data; uses STEREO L3 SFU and the supplied Wind Z-channel gain conversion. Produces dynamic spectra and nearest-channel light curves, recording the actual channel frequency. `Ch_frq` is MHz; `vmin/vmax` are log10(SFU) display limits. Returns paths/errors per spacecraft. |
 
 Numerical DH products are organised as `CDFs/`, `DSpickle/` and `PNGs/`, each with `STEREO_A/`, `STEREO_B/` and `Wind/` subdirectories. Existing CDFs/directories are reused.
 
@@ -100,10 +100,10 @@ result=dm.get_DHband_calibDS('2014-11-03T06:00:00','2014-11-03T06:16:00',
 | Function | Purpose and outputs |
 |---|---|
 | `MWAavail(sT,DT=30,outdir='./')` | Queries MWA observations over a duration in minutes, saves an observation-table pickle and returns success/failure. |
-| `find_flare(sT,eT,flare_cat='hessi_flare_catalog.csv')` | Returns `(IDs,Tab)` for catalog flares fully contained in the interval, including boundary times, sorted by start time. Accepts CSV or a pickled Astropy Table. |
-| `find_RHESSI(sT,eT,outdir='./',flare_cat=...,baseurl=...)` | Saves the selected flare catalog and matching RHESSI quicklook files, plus available daily orbit panels. Returns `(IDs,Tab)`; daily panels may extend beyond the event interval. |
-| `plot_goes_derivative(sT,eT,outdir='./',satellite=None,savedata=True)` | Retrieves GOES 1–8 Angstrom flux and computes its derivative using actual sample intervals. `satellite=None` selects the highest available satellite number. Saves a two-panel PDF and optional data pickle. |
-| `find_coobs(sT,eT,instrs,wvs,outdir='./',RHESSI_flarecat=...,downdata=False,dT=None,HMI_product=None)` | Searches matching instrument/wavelength observations; wavelength lists use Astropy units. Optionally downloads and prepares supported products. `HMI_product` filters magnetogram/continuum/dopplergram; `None` leaves HMI unfiltered here. Returns failed instrument/wavelength searches. |
+| `find_flare(sT,eT,`<br>`flare_cat='hessi_flare_catalog.csv')` | Returns `(IDs,Tab)` for catalog flares fully contained in the interval, including boundary times, sorted by start time. Accepts CSV or a pickled Astropy Table. |
+| `find_RHESSI(sT,eT,outdir='./',`<br>`flare_cat=...,baseurl=...)` | Saves the selected flare catalog and matching RHESSI quicklook files, plus available daily orbit panels. Returns `(IDs,Tab)`; daily panels may extend beyond the event interval. |
+| `plot_goes_derivative(sT,eT,`<br>`outdir='./',satellite=None,`<br>`savedata=True)` | Retrieves GOES 1–8 Angstrom flux and computes its derivative using actual sample intervals. `satellite=None` selects the highest available satellite number. Saves a two-panel PDF and optional data pickle. |
+| `find_coobs(sT,eT,instrs,wvs,`<br>`outdir='./',RHESSI_flarecat=...,`<br>`downdata=False,dT=None,`<br>`HMI_product=None)` | Searches matching instrument/wavelength observations; wavelength lists use Astropy units. Optionally downloads and prepares supported products. `HMI_product` filters magnetogram/continuum/dopplergram; `None` leaves HMI unfiltered here. Returns failed instrument/wavelength searches. |
 
 ## solar_overlay.py
 
@@ -134,10 +134,10 @@ frames=overlay(['LASCO/C2','SDO/AIA94'],
 | `base_diff_DT=None` | Base reference time or per-dataset dictionary; defaults to the event start. Before the event, selects the latest exposure at/before the reference; after the event, earliest at/after; inside the event, nearest exposure. Missing base references raise. |
 | `reference_search=3600` | Maximum distance in seconds for external-reference/predecessor searches. |
 | `tmap=None` | Target Map/FITS defining fixed FoV and WCS. Otherwise the bottom image provides the grid and reference epoch. |
-| `alpha=0.6,npix=1024,dpi=150,figsize=7.0` | Upper-layer maximum opacity, longest display-grid dimension, figure resolution and square figure size in inches. Upper image opacity also depends on intensity. |
-| `outdir='./',cache_dir='./solar_data'` | Output PNG directory and acquisition/reference cache. |
+| `alpha=0.6,npix=1024,dpi=150,`<br>`figsize=7.0` | Upper-layer maximum opacity, longest display-grid dimension, figure resolution and square figure size in inches. Upper image opacity also depends on intensity. |
+| `outdir='./',`<br>`cache_dir='./solar_data'` | Output PNG directory and acquisition/reference cache. |
 | `need_LASCO_calib=False` | Default uses preview preparation. `True` enables verified Level-1/fallback acquisition or optional local calibration. Inspect product provenance before photometry. |
-| `pfss_dir=None,pfss_kwargs=None,N_Bloop=np.nan` | Reuse saved PFSS, or supply model-building settings. Directory mode requires saved PFSS when that layer is requested. NaN keeps all closed loops; an integer retains the highest visible loops; zero shows open lines only. |
+| `pfss_dir=None,pfss_kwargs=None,`<br>`N_Bloop=np.nan` | Reuse saved PFSS, or supply model-building settings. Directory mode requires saved PFSS when that layer is requested. NaN keeps all closed loops; an integer retains the highest visible loops; zero shows open lines only. |
 
 Layer order is LASCO C3, LASCO C2, HMI, AIA/EIT image layers and PFSS. AIA bands preserve their supplied order. Labels report actual layer observation times; the corner timestamp is the actual bottom-image time. Cadence selection does not imply perfectly simultaneous exposures. Reference images are reprojected to the current WCS before subtraction; differential solar rotation is not corrected. Prepared AIA Level-1.5 inputs are required and are not calibrated twice. EIT must be official Level-1.
 
