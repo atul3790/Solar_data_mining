@@ -217,7 +217,7 @@ It returns model/trace information including `outdir` and saves `boundary.fits`,
 
 ## Companion code: moving-structure and overlay frames
 
-[`Moving_structure_frames`](https://github.com/atul3790/Solar_data_mining/tree/moving-structure-frames/Moving_structure_frames) builds diagnostic movies from these modules. It follows CMEs and other moving structures in LASCO, STEREO COR2 and HI1 images, and makes overlay frames for LASCO, STEREO and PSP/WISPR. Each frame combines:
+[`Moving_structure_frames`](https://github.com/atul3790/Solar_multiwb-big-data_analysis/tree/moving-structure-frames/Moving_structure_frames) (repository `Solar_multiwb-big-data_analysis`, branch `moving-structure-frames`) builds diagnostic movies from these modules. It follows CMEs and other moving structures in LASCO, STEREO COR2 and HI1 images, and makes overlay frames for LASCO, STEREO and PSP/WISPR. Each frame combines:
 
 - bright and dark structure contours with in-plane drift arrows
 - projected PFSS field lines from the observing spacecraft's viewpoint
