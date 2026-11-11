@@ -3,6 +3,9 @@ Multiwb_datamine.py -- observation retrieval and instrument preparation.
 
 Public functions
 ----------------
+Image download functions automatically save standard instrument-color PNGs.
+FITS/JP2 data, calibration and return values are unchanged by PNG generation.
+
 All event times are UTC. Image cadence dT is in seconds, except get_DHband_DS,
 where dT is an event timestamp. outdir/outfold selects the output directory.
 
@@ -77,11 +80,12 @@ get_DHband_calibDS(sT, eT, outdir='./', sats=('sta','stb','wind'),
     Returns output paths and errors per spacecraft.
     Requires spacepy and Matrix_ops.Reg; reuses existing directories/CDFs.
 
-get_LASCO_imgs(sT, eT, dT, instr, outdir='./LASCO', need_calib=False)
+get_LASCO_imgs(sT, eT, dT, instr, outdir='./LASCO', need_calib=False, helioviewer=True)
     Input: interval, cadence, detector C2/C3
-    need_calib=True tries Level-1/MSB -> Helioviewer JP2 -> archive DN/s;
-    False uses archive DN/s preparation. JP2 is visualization, not MSB data.
-    Output: list of Maps; originals in outdir/raw, returned FITS in outdir/maps.
+    need_calib=True: Level-1/MSB (outdir/maps), else Helioviewer (outdir/maps_HV),
+    else Level-0.5 DN/s. need_calib=False: archive Level-0.5 DN/s (outdir/maps), and
+    with helioviewer=True a JP2 for every bin in raw/helioviewer_<instr>/.
+    Output: list of Maps; originals in outdir/raw.
 
 calib_LASCO(images, instr=None, outdir='./LASCO_calibrated')
     Input: existing FITS path/Map or list/tuple; infer C2/C3 if instr is None.
@@ -92,6 +96,9 @@ calib_LASCO(images, instr=None, outdir='./LASCO_calibrated')
 get_SDO_imgs(sT, eT, dT, instrument='AIA', wave=None, outdir='./SDO')
     Input: interval, cadence, AIA/HMI; AIA wave in Angstrom (94, 131, 171, 193,
     211, 304, 335, 1600, 1700); HMI wave=None selects LOS magnetograms.
+    helioviewer=True saves JP2 previews for missing cadence bins under:
+	outdir/<instrument>/<wave>/raw_SDO/helioviewer/
+
     Output: time-sorted Maps and finished FITS in outdir; original downloads
     in outdir/raw_SDO. Uses find_coobs; does not repeat AIA preparation.
 
@@ -100,6 +107,46 @@ get_EIT_imgs(sT, eT, dT, wave, outdir='./EIT', archive_url=...)
     equivalent official Level-1 archive mirror.
     Output: calibrated Level-1 Maps and selected FITS in outdir; rejects raw EIT.
 
+get_STEREO_imgs(sT,eT,dT,spacecraft='A',instruments=('COR2',),
+	waves=None,outdir='./STEREO',nproc=4,polar=0,helioviewer=True)
+	spacecraft: 'A' or 'B'.
+	instruments: EUVI, COR1, COR2 or HI1; a string or a sequence.
+	waves: one entry per instrument, e.g. [[171,195],None,None].
+		waves=None selects all four EUVI bands.
+	nproc: number of FITS download workers; 1 runs serially.
+	polar: COR1 FITS polarizer angle, 0/120/240 degrees.
+	COR2 always returns total-brightness images (POLAR=1001, d*c2 files).
+	helioviewer: save original JP2 previews for missing cadence bins.
+	HI1: route Level-1 -> Helioviewer -> Level-0.5, like COR2. Level-1 HI
+		(hi_prep DN/s, MSB or S10) is only at UKSSDC behind a registered
+		login, so local Level-1 files under STEREO_<sc>/HI1 (e.g. raw/level1)
+		are used first; Helioviewer has no HI source (step reported and
+		skipped); otherwise Level-0.5 science sums (s*h1*.fts, N_IMAGES>1)
+		come from SSC/VSO into STEREO_<sc>/HI1/maps. Bins are
+		max(dT, 2400 s), the HI1 science cadence.
+	Returns one time-sorted list of FITS-based Maps per combination.
+	JP2s are saved separately and are not returned as Maps.
+
+load_map(source)
+	Load any FITS/JP2 path or Map with a truthful WCS. Use it in every
+	consumer (overlay, flow tracking). Archive FITS keep their CROTA/PC roll;
+	Helioviewer pixels are north-up, so stale rolls on Helioviewer-derived
+	files are zeroed (old value in OV_ROLL). Callers then only follow the WCS:
+	rotate()/reproject when the WCS says so, never by source or level.
+    
+get_helioviewer_jp2(sT,eT,dT,instrument,wave=None,spacecraft='A',outdir)
+	Save a Helioviewer JP2 for every cadence bin (LASCO/AIA/HMI/EUVI/COR1/COR2).
+
+jp2_to_fits(jp2_paths,outdir,skip_times=())
+	Convert JP2s to FITS (conventionally into a maps_HV folder): display
+	values, roll 0 (old in OV_ROLL), observer kept, OV_HV/OV_SRC tags.
+
+helioviewer=True in get_SDO_imgs/get_LASCO_imgs/get_STEREO_imgs saves a JP2
+for every cadence bin in raw/helioviewer*/ alongside the science FITS.
+
+Sources: FITS via Fido/VSO (SDAC, SSC data archive, JSOC), the LASCO and
+EIT instrument archives, and Helioviewer JP2. Browse JPG/PNG quicklooks
+(e.g. stereo-ssc .../browse/) carry no WCS and are never used as images.
 The image functions save FITS Maps to user-chosen outdir subfolders for reuse by
 solar_overlay.overlay(...). AIA from find_coobs and official EIT
 Level-1 are already prepared. Local LASCO calibration requires SolarSoft/IDL;
@@ -107,7 +154,7 @@ verified downloaded Level-1 products do not. Internal helpers are in the
 companion datamine_calib_helper.py; keep it beside this module.
 This module does not import solar_overlay or run an observing workflow on import.
 """
-__all__ = ['MWAavail', 'get_norp_LC', 'get_norh_imgs', 'find_flare', 'find_RHESSI', 'plot_goes_derivative', 'find_coobs', 'radspec_to_pickle', 'plot_culgoora_spec', 'get_RSTN', 'get_DHband_quicklookDS', 'get_DHband_calibDS', 'get_LASCO_imgs', 'calib_LASCO', 'get_SDO_imgs', 'get_EIT_imgs']
+__all__ = ['MWAavail', 'get_norp_LC', 'get_norh_imgs', 'find_flare', 'find_RHESSI', 'plot_goes_derivative', 'find_coobs', 'radspec_to_pickle', 'plot_culgoora_spec', 'get_RSTN', 'get_DHband_quicklookDS', 'get_DHband_calibDS', 'get_LASCO_imgs', 'calib_LASCO', 'get_SDO_imgs', 'get_EIT_imgs', 'get_STEREO_imgs', 'get_helioviewer_jp2', 'jp2_to_fits', 'load_map']
 import re,urllib,os,shutil
 import urllib.request
 from urllib.parse import urljoin,urlsplit
@@ -129,6 +176,7 @@ from bs4 import BeautifulSoup as bs
 from radiospectra.spectrogram import Spectrogram
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from sunpy.visualization import colormaps as _sunpy_cmaps  # Register instrument tables
 from aiapy.calibrate import register, update_pointing
 from aiapy.calibrate.utils import get_pointing_table
 from sunpy.map import Map
@@ -136,14 +184,64 @@ import pandas as pd
 import ssl
 from copy import deepcopy as cpy
 import datamine_calib_helper as _helper
+from datamine_calib_helper import load_map, jp2_to_fits
 import bz2
 from ecallisto_ng.plotting.plotting import plot_spectrogram_mpl
-from spacepy import pycdf
 from Matrix_ops import Reg
 from multiprocess import Pool
 
 import certifi
 ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=certifi.where())
+
+def _save_image_previews(images,outdir,instrument=None,product=None):
+	"""Save display PNGs with instrument colors; never alter input FITS/JP2 pixels."""
+	folder=Path(outdir).expanduser().resolve()
+	try:folder.mkdir(parents=True,exist_ok=True)
+	except OSError as exc:
+		warnings.warn(f'Could not create preview folder: {exc}')
+		return []
+	written=[]
+	for image in images:
+		try:
+			path=Path(image) if isinstance(image,(str,Path)) else None
+			m=sunpy.map.Map(image) if path is not None else image
+			kind=str(instrument or m.detector).upper()
+			jp2=(path is not None and path.suffix.lower() in ('.jp2','.j2k')) or bool(m.meta.get('ov_hv',False))
+			data=np.asarray(m.data,dtype=float)
+			if data.ndim!=2:raise ValueError('A two-dimensional image is required.')
+			valid=np.isfinite(data)
+			if not valid.any():continue
+			values=data[valid]
+			band=str(product) if product is not None else ''
+			if kind in ('AIA','EUVI','EIT'):
+				wave=int(round(m.wavelength.to_value(u.angstrom)))
+				band=str(wave)
+				cmap=plt.get_cmap(('sdoaia' if kind=='AIA' else 'euvi' if kind=='EUVI' else 'sohoeit')+band)
+			elif kind=='LASCO':
+				band=str(m.detector).upper()
+				cmap=plt.get_cmap('soholasco'+band[-1])
+			else:
+				cmap=m.plot_settings.get('cmap','gray')
+			magnetogram=kind=='HMI' and any(tag in (str(product)+' '+str(m.measurement)).lower()
+				for tag in ('magnet','los_magnetic','gauss'))
+			if magnetogram and not jp2:
+				limit=max(float(np.percentile(abs(values),99)),np.finfo(float).eps)
+				lo,hi=-limit,limit
+			elif jp2 and values.min()>=0 and values.max()<=255:
+				lo,hi=0.,255.
+			else:
+				lo,hi=np.percentile(values,[1,99.5])
+			weight=np.clip((data-lo)/max(hi-lo,np.finfo(float).eps),0,1)
+			if kind in ('AIA','EUVI','EIT'):
+				cmap,norm=_helper._image_display_settings(m,kind,band,jp2)
+				weight=norm(np.ma.masked_invalid(data))
+			name=re.sub(r'[^A-Za-z0-9_.-]','_',kind+('_'+band if band else ''))
+			output=folder/f'{name}_{"JP2" if jp2 else "FITS"}_{m.date.strftime("%Y%m%d_%H%M%S")}.png'
+			plt.imsave(output,np.ma.masked_invalid(weight),origin='lower',cmap=cmap,vmin=0,vmax=1)
+			written.append(str(output))
+		except Exception as exc:
+			warnings.warn(f'Could not save image preview: {exc}')
+	return written
 
 ### MWA obs query for a few date times
 def MWAavail(sT,DT=30,outdir='./'):
@@ -732,19 +830,22 @@ def plot_goes_derivative(sT, eT, outdir='./',satellite=None,savedata=True):
 # plot_goes_derivative("2025-08-10 00:00", "2025-08-10 02:00")
 
 ######### Find otherwave coobs
-def find_coobs(sT,eT,instrs,wvs,outdir='./',RHESSI_flarecat="hessi_flare_catalog.csv",downdata=False,dT=None,HMI_product=None):
+def find_coobs(sT,eT,instrs,wvs,outdir='./',RHESSI_flarecat="hessi_flare_catalog.csv",downdata=False,dT=None,HMI_product=None,flat_outdir=False):
 	'''
 	sT is the start datetime string of the event 'YYYY-MM-DDThh:mm:ss'.
 	eT is the end datetime string of the event 'YYYY-MM-DDThh:mm:ss'.
 	instrs = ['EIS', 'AIA'] - list of instruments of choice. or just a string 'EIT'
 	wvs=[[],[]] list of list of wavelengths as floats with astropy units for each instrument. leave as [] if all data is needed for an instrument
 	outdir = path to directory where in case any data is found will be saved
+	flat_outdir: True saves directly in outdir without instrument/wavelength folders;
+		intended for single instrument-product calls from get_SDO_imgs.
 	dT: optional cadence in seconds.
 	HMI_product: 'magnetogram', 'continuum' or 'dopplergram'; None leaves HMI unfiltered.
 	These select LOS magnetic field, continuum intensity or LOS velocity respectively.
 	The archive names 'LOS_magnetic_field', 'intensity' and 'LOS_velocity' are also accepted.
 	HMI_product applies only to HMI, including calls requesting several instruments.
 	Example: find_coobs(sT,eT,['HMI'],[],outdir='./HMI/',downdata=True,HMI_product='continuum')
+	Instrument-color PNGs are saved automatically under the download folder/PNGs.
 	downdata=True will download observations found outdir
 
 	'''
@@ -791,9 +892,9 @@ def find_coobs(sT,eT,instrs,wvs,outdir='./',RHESSI_flarecat="hessi_flare_catalog
 				get_RSTN(sT,eT,instrs=[ins],outdir=outdir,downdata=downdata)
 				continue
 			os.chdir(cwd)
-			if not os.path.isdir(outdir+ins):
-				os.mkdir(outdir+ins)
-			os.chdir(outdir+ins)
+			destination=outdir if flat_outdir else outdir+ins
+			os.makedirs(destination,exist_ok=True)
+			os.chdir(destination)
 
 			if len(wv)!=0:
 				for wvj in wv:
@@ -818,26 +919,43 @@ def find_coobs(sT,eT,instrs,wvs,outdir='./',RHESSI_flarecat="hessi_flare_catalog
 					if downdata==True:
 						print('Downloading.....',ins,' data for ',wvj)
 						print(res[prv])
-						if not os.path.isdir(str(wvj.value)+str(wvj.unit)+'/'):
-							os.mkdir(str(wvj.value)+str(wvj.unit)+'/')
-						bdir=os.getcwd() 
-						os.chdir(str(wvj.value)+str(wvj.unit)+'/') 
-						for prv in res.keys():
+						wave_folder='.' if flat_outdir else str(wvj.value)+str(wvj.unit)
+						os.makedirs(wave_folder,exist_ok=True)
+						bdir=os.getcwd()
+						os.chdir(wave_folder)
+						attempts=[]
+						for client in sorted(res.keys(),key=lambda k:str(k).lower()!='vso'):
+							table=res[client]
+							attempts.append((str(client),table,{}))
+							if str(client).lower()=='vso':
+								# ROB can be an AIA mirror, even when Provider is JSOC.
+								if ins.lower()=='aia':
+									attempts.append(('VSO site ROB',table,{'site':'ROB'}))
+								if 'Provider' in table.colnames:
+									providers=np.asarray([str(p).strip().upper() for p in table['Provider']])
+									for provider in sorted(set(providers),key=lambda p:(p!='ROB',p)):
+										attempts.append(('VSO provider '+provider,table[providers==provider],{}))
+						downloaded_files=[]
+						for label,records,options in attempts:
 							try:
-								print('Trying provider:',prv)
-								dwnfils=Fido.fetch(res[prv],path='./')
-								for error in dwnfils.errors:
+								print('Trying download route:',label)
+								dwnfils=Fido.fetch(records,path='./',**options)
+								errors=getattr(dwnfils,'errors',[])
+								for error in errors:
 									print(error)
-								if dwnfils.data:
+								for fil in dwnfils.data:
+									if fil not in downloaded_files:
+										downloaded_files.append(fil)
+								if dwnfils.data and not errors:
 									break
 							except Exception as exc:
-								print('Download failed:',prv,exc)
-						else:
+								print('Download failed:',label,exc)
+						if not downloaded_files:
 							print('No files downloaded from available providers for',ins)
 							os.chdir(bdir)
 							continue
-  
-						for fil in dwnfils.data:
+						
+						for fil in downloaded_files:
 							if ins.lower()=='aia':
 									try:
 										aiah=fits.getheader(fil,1)
@@ -877,6 +995,9 @@ def find_coobs(sT,eT,instrs,wvs,outdir='./',RHESSI_flarecat="hessi_flare_catalog
 										del AMap
 										del AMap15 
 
+							if ins.lower() in ('aia','hmi','euvi','eit','lasco'):
+								preview_file=fil.replace('lev1','lev15') if ins.lower()=='aia' and os.path.isfile(fil.replace('lev1','lev15')) else fil
+								_save_image_previews([preview_file],Path.cwd()/'PNGs',ins,HMI_product if ins.lower()=='hmi' else None)
 							if ins.lower()=='norh':
 								os.replace(fil,fil if fil.endswith('.fits') else fil+'.fits')
 								get_norh_imgs(sT,eT,outdir=os.getcwd())
@@ -907,21 +1028,38 @@ def find_coobs(sT,eT,instrs,wvs,outdir='./',RHESSI_flarecat="hessi_flare_catalog
 				if downdata==True:
 					print('Downloading.....',ins,' data for ',wv)
 					print(res[prv])
-					for prv in res.keys():
+					attempts=[]
+					for client in sorted(res.keys(),key=lambda k:str(k).lower()!='vso'):
+						table=res[client]
+						attempts.append((str(client),table,{}))
+						if str(client).lower()=='vso':
+							# ROB can be an AIA mirror, even when Provider is JSOC.
+							if ins.lower()=='aia':
+								attempts.append(('VSO site ROB',table,{'site':'ROB'}))
+							if 'Provider' in table.colnames:
+								providers=np.asarray([str(p).strip().upper() for p in table['Provider']])
+								for provider in sorted(set(providers),key=lambda p:(p!='ROB',p)):
+									attempts.append(('VSO provider '+provider,table[providers==provider],{}))
+					downloaded_files=[]
+					for label,records,options in attempts:
 						try:
-							print('Trying provider:',prv)
-							dwnfils=Fido.fetch(res[prv],path='./')
-							for error in dwnfils.errors:
+							print('Trying download route:',label)
+							dwnfils=Fido.fetch(records,path='./',**options)
+							errors=getattr(dwnfils,'errors',[])
+							for error in errors:
 								print(error)
-							if dwnfils.data:
+							for fil in dwnfils.data:
+								if fil not in downloaded_files:
+									downloaded_files.append(fil)
+							if dwnfils.data and not errors:
 								break
 						except Exception as exc:
-							print('Download failed:',prv,exc)
-					else:
+							print('Download failed:',label,exc)
+					if not downloaded_files:
 						print('No files downloaded from available providers for',ins)
 						continue
- 
-					for fil in dwnfils.data:
+					
+					for fil in downloaded_files:
 						if ins.lower()=='aia':
 								try:
 									aiah=fits.getheader(fil,1)
@@ -961,6 +1099,9 @@ def find_coobs(sT,eT,instrs,wvs,outdir='./',RHESSI_flarecat="hessi_flare_catalog
 									del AMap
 									del AMap15 
 
+						if ins.lower() in ('aia','hmi','euvi','eit','lasco'):
+							preview_file=fil.replace('lev1','lev15') if ins.lower()=='aia' and os.path.isfile(fil.replace('lev1','lev15')) else fil
+							_save_image_previews([preview_file],Path.cwd()/'PNGs',ins,HMI_product if ins.lower()=='hmi' else None)
 						if ins.lower()=='norh':
 							os.replace(fil,fil if fil.endswith('.fits') else fil+'.fits')
 							get_norh_imgs(sT,eT,outdir=os.getcwd())
@@ -1558,6 +1699,7 @@ def get_DHband_calibDS(sT,eT,outdir='./',sats=('sta','stb','wind'),Ch_frq=1.0, s
 	Plots use 90 dpi, 18-point axis labels and 16-point tick labels.
 	Requires the existing module-level imports.
 	'''
+	from spacepy import pycdf
 	start,end=np.datetime64(sT,'us'),np.datetime64(eT,'us')
 	if np.isnat(start) or np.isnat(end) or end<=start:
 		raise ValueError('eT must be later than sT; both must be valid UTC times.')
@@ -1793,15 +1935,23 @@ def get_DHband_calibDS(sT,eT,outdir='./',sats=('sta','stb','wind'),Ch_frq=1.0, s
 # =============================================================================
 
 
-def get_LASCO_imgs(sT, eT, dT, instr, outdir='./LASCO_1', need_calib=False):
-	"""Return LASCO Maps and save FITS under outdir/maps; originals stay in outdir/raw.
+def get_LASCO_imgs(sT, eT, dT, instr, outdir='./LASCO_1', need_calib=False, helioviewer=True):
+	"""Return LASCO Maps; originals stay in outdir/raw.
 
 	sT/eT: UTC 'YYYY-MM-DDThh:mm:ss'; dT: cadence seconds; instr: 'C2'/'C3'.
-	need_calib=False: available archive FITS, exposure-normalized to DN/s and
-	FoV-masked when uncalibrated. True: verified Fido Level-1/MSB FITS, then
-	Helioviewer JP2 visualization, then archive DN/s with explicit warnings.
-	No SolarSoft is attempted here. 
-	Use calib_LASCO() to try SolarSoft on existing Level-0.5 data instead.
+	need_calib=True: route Level-1 -> Helioviewer -> Level-0.5. Verified
+		Level-1/MSB FITS from VSO/SDAC (saved unchanged in outdir/maps); if none
+		is usable, Helioviewer images (north-up display values, canonical tags,
+		outdir/maps_HV); only if Helioviewer also fails, archive Level-0.5 DN/s.
+	need_calib=False: archive Level-0.5 FITS, exposure-normalized to DN/s and
+		FoV-masked, saved in outdir/maps.
+	helioviewer=True (need_calib=False only): also save a Helioviewer JP2 for
+		every cadence bin in outdir/raw/helioviewer_<instr>/ (not returned);
+		jp2_to_fits(..., outdir/'maps_HV') converts them if needed.
+	No SolarSoft is attempted here; calib_LASCO() can try it on Level-0.5 data.
+	Roll: every saved FITS has a truthful WCS. Level-0.5/DN/s keep the
+	spacecraft CROTA (pixels unrotated); Level-1 is saved unchanged; Helioviewer
+	pixels are north-up, so CROTA=0 and the roll is kept in OV_ROLL.
 	"""
 	if not isinstance(need_calib, (bool, np.bool_)):
 		raise ValueError('need_calib must be True or False.')
@@ -1810,23 +1960,48 @@ def get_LASCO_imgs(sT, eT, dT, instr, outdir='./LASCO_1', need_calib=False):
 		raise ValueError("instr must be 'C2' or 'C3'.")
 	_helper._target_times(sT, eT, dT)  # Validate before entering network fallbacks.
 	root = Path(outdir).expanduser().resolve()
-	files=None
 	if need_calib:
-		for source in ('level1', 'helioviewer'):
-			try:
-				maps = _helper._get_lasco_source(sT, eT, dT, instr, root/'raw', source, calibrate=(source == 'helioviewer'))
-				_helper._lasco_notice(maps)
-				return _helper._save_maps(maps, root/'maps', 'LASCO_' + instr)
-			except Exception as exc:
-				warnings.warn(f'LASCO {source} retrieval failed: {exc}; trying next source.')
-	maps = _helper._get_lasco_source(sT, eT, dT, instr, root/'raw', 'archive',files=files, calibrate=True)
+		try:
+			maps = _helper._get_lasco_source(sT, eT, dT, instr, root/'raw', 'level1')
+			_helper._lasco_notice(maps)
+			_save_image_previews(maps,root/'PNGs','LASCO',instr)
+			return _helper._save_maps(maps, root/'maps', 'LASCO_' + instr)
+		except Exception as exc:
+			warnings.warn(f'LASCO {instr} Level-1 retrieval failed: {exc}; trying Helioviewer next.')
+		try:
+			maps = _helper._get_lasco_source(sT, eT, dT, instr, root/'raw', 'helioviewer', calibrate=True)
+			_save_image_previews(maps,root/'PNGs','LASCO',instr)
+			maps = _helper._save_maps(maps, root/'maps_HV', 'LASCO_' + instr + '_HV')
+			_helper._lasco_notice(maps)
+			return maps
+		except Exception as exc:
+			warnings.warn(f'LASCO {instr} Helioviewer retrieval failed: {exc}; last fallback: archive Level-0.5 DN/s.')
+	elif helioviewer:
+		try:
+			jp2s=_helper._fill_helioviewer_jp2(sT,eT,dT,[],root/'raw'/f'helioviewer_{instr}','LASCO',instr)
+			print(f'LASCO/{instr}: {len(jp2s)} Helioviewer JP2s in the window.')
+		except Exception as exc:
+			warnings.warn(f'LASCO {instr} Helioviewer JP2 retrieval failed: {exc}')
+	maps = _helper._get_lasco_source(sT, eT, dT, instr, root/'raw', 'archive', calibrate=True)
 	for image in maps:
 		if not _helper._lasco_science_ready(image) and not image.meta.get('ov_hv', False):
 			image.meta['ov_full'] = False
 			image.meta['ov_cal'] = 'Level-0.5 exposure-normalized DN/s; not full Level-1 calibration'
+	_save_image_previews(maps,root/'PNGs','LASCO',instr)
 	maps = _helper._save_maps(maps, root/'maps', 'LASCO_' + instr)
 	_helper._lasco_notice(maps)
 	return maps
+
+
+def get_helioviewer_jp2(sT,eT,dT,instrument,wave=None,spacecraft='A',outdir='./helioviewer'):
+	"""Save a Helioviewer JP2 for every cadence bin; return their paths.
+
+	instrument: 'LASCO' (wave='C2'/'C3'), 'AIA' (wave in Angstrom), 'HMI'
+	(wave='magnetogram'/'continuum'), 'EUVI' (wave 171/195/284/304), 'COR1'
+	or 'COR2' (spacecraft 'A'/'B'). Cached JP2s in outdir are reused.
+	JP2 pixels are north-up display values; use jp2_to_fits for FITS copies.
+	"""
+	return _helper._fill_helioviewer_jp2(sT,eT,dT,[],Path(outdir),str(instrument).upper(),wave,str(spacecraft).upper())
 
 
 def calib_LASCO(images, instr=None, outdir='./LASCO_calibrated'):
@@ -1893,17 +2068,29 @@ def calib_LASCO(images, instr=None, outdir='./LASCO_calibrated'):
 # SDO (AIA / HMI)
 # =============================================================================
 
-def get_SDO_imgs(sT,eT,dT,instruments=['AIA','HMI'],waves=[[94,171,193],['magnetogram','continuum']], outdir='./SDO',nproc=4):
+def get_SDO_imgs(sT,eT,dT,instruments=['AIA','HMI'],
+	waves=[[94,171,193],['magnetogram']],outdir='./SDO',
+	nproc=4,helioviewer=True):
 	'''
-	Get AIA/HMI maps in parallel for instrument-wave combinations.
+	Get AIA/HMI FITS Maps in parallel for instrument-wave combinations.
 
-	Example: instruments=['AIA','HMI'],
-	waves=[[94,171],['magnetogram','continuum']].
-	Return Map lists in the same order as the input combinations.
+	Raw FITS: outdir/<instrument>/<wave>/raw/
+	JP2 previews: outdir/<instrument>/<wave>/raw/helioviewer/
+	Finished FITS: outdir/<instrument>/<wave>/
+
+	Return FITS-based Map lists in input combination order.
+	JP2s remain separate; AIA preparation is handled by find_coobs.
+	Existing nested caches remain searchable. Cached FITS are checked first;
+	only missing cadence slots are queried in bounded windows up to +/-60 s.
+	A failed slot does not discard other successful downloads.
 	'''
 	if len(instruments)!=len(waves):
 		raise ValueError('instruments and waves must have matching lengths.')
-	_helper._target_times(sT,eT,dT)
+	if int(nproc)!=nproc or nproc<1:
+		raise ValueError('nproc must be a positive integer.')
+	targets=list(_helper._target_times(sT,eT,dT))
+	start,end=Time(sT),Time(eT)
+	if targets[-1]<end:targets.append(end)
 
 	jobs=[]
 	for instrument,products in zip(instruments,waves):
@@ -1917,79 +2104,95 @@ def get_SDO_imgs(sT,eT,dT,instruments=['AIA','HMI'],waves=[[94,171,193],['magnet
 				wave='magnetogram' if wave is None else wave
 				if wave not in ('magnetogram','dopplergram','continuum'):
 					raise ValueError('Invalid HMI product.')
-			jobs.append((instrument,wave))
+			if (instrument,wave) not in jobs:
+				jobs.append((instrument,wave))
 
 	def download(instrument,wave):
 		destination=Path(outdir).expanduser().resolve()/instrument/str(wave)
-		cache_dir=destination/'raw_SDO'
-		folder=cache_dir/'Multiwb'
-		folder.mkdir(parents=True,exist_ok=True)
-		cwd=os.getcwd()
-		try:
-			find_coobs(sT,eT,[instrument],
-				[[float(wave)*u.angstrom]] if instrument=='AIA' else [[]],
-				outdir=str(folder)+os.sep,downdata=True,dT=float(dT),
-				HMI_product=wave if instrument=='HMI' else None)
-		finally:
-			os.chdir(cwd)
+		raw=destination/'raw'
+		raw.mkdir(parents=True,exist_ok=True)
+		# Reuse cached FITS before requesting anything. Read each file only once.
+		cache={};seen={}
+		def scan_new_fits():
+			for path in _helper._fits_paths(destination):
+				path=Path(path).resolve()
+				stat=path.stat();signature=(stat.st_mtime_ns,stat.st_size)
+				if seen.get(path)==signature:continue
+				seen[path]=signature
+				try:
+					m=sunpy.map.Map(path)
+					if m.meta.get('ov_hv',False):continue
+					if instrument not in (str(m.instrument)+' '+str(m.detector)).upper():continue
+					if instrument=='AIA':
+						if not np.isclose(m.wavelength.to_value(u.angstrom),wave):continue
+						prepared=float(m.meta.get('lvl_num',0))>=1.5 or any(
+							value in str(m.meta.get('series','')).lower() for value in ('lev1.5','lev15'))
+						if not prepared:
+							warnings.warn(f'AIA FITS is not prepared Level 1.5: {path}')
+							continue
+					if start<=m.date<=end:cache[path]=m.date
+				except Exception as exc:
+					warnings.warn(f'Skipping unreadable cached FITS {path}: {exc}')
+		scan_new_fits()
+		tolerance=float(dT)/2
+		padding=min(60.,tolerance)
+		for target in targets:
+			if any(abs((time-target).to_value(u.s))<=tolerance for time in cache.values()):
+				continue
+			lo=max(start,target-padding*u.s)
+			hi=min(end,target+padding*u.s)
+			print(f'Missing {instrument}/{wave}: {lo.isot} -- {hi.isot}')
+			cwd=os.getcwd()
+			try:
+				find_coobs(lo.isot,hi.isot,[instrument],
+					[[float(wave)*u.angstrom]] if instrument=='AIA' else [[]],
+					outdir=str(raw)+os.sep,downdata=True,dT=float(dT),
+					HMI_product=wave if instrument=='HMI' else None,
+					flat_outdir=True)
+			except Exception as exc:
+				warnings.warn(f'{instrument}/{wave} FITS retrieval failed at {target.isot}: {exc}')
+			finally:
+				os.chdir(cwd)
+			scan_new_fits()
+		# Keep only real exposures within half a cadence of each requested slot.
+		paths=[]
+		for target in targets:
+			near=[p for p,time in cache.items() if abs((time-target).to_value(u.s))<=tolerance]
+			if not near:continue
+			path=min(near,key=lambda p:(abs((cache[p]-target).to_value(u.s)),p.parent!=destination,str(p)))
+			if path not in paths:paths.append(path)
+		paths.sort(key=lambda p:cache[p].mjd)
 
-		# Each combination has a separate folder, including HMI products.
-		files=list(_helper._fits_paths(folder/instrument))
-		_,paths=_helper._series(
-			instrument,wave,sT,eT,dT,cache_dir,files=files)
-		maps=[sunpy.map.Map(p) for p in paths]
-		return _helper._save_maps(
-			maps,destination,instrument+'_'+str(wave))
+		maps=[]
+		for path in paths:
+			try:
+				maps.append(sunpy.map.Map(path))
+			except Exception as exc:
+				warnings.warn(f'Skipping unreadable FITS {path}: {exc}')
+		if maps:
+			maps=_helper._save_maps(
+				maps,destination,instrument+'_'+str(wave))
+
+		_save_image_previews(maps,destination/'PNGs',instrument,wave)
+		if helioviewer:
+			try:
+				jp2s=_helper._fill_helioviewer_jp2(
+					sT,eT,dT,[],raw/'helioviewer',instrument,wave)
+				_save_image_previews(jp2s,raw/'helioviewer',instrument,wave)
+				print(f'{instrument}/{wave}: {len(maps)} FITS Maps; '
+					f'{len(jp2s)} JP2 fallback previews.')
+			except Exception as exc:
+				warnings.warn(f'{instrument}/{wave} JP2 fallback failed: {exc}')
+		return maps
 
 	if not jobs:
 		return []
-	if nproc==1:
+	workers=min(int(nproc),len(jobs))
+	if workers==1:
 		return [download(*job) for job in jobs]
-	with Pool(nproc) as pool:
+	with Pool(workers) as pool:
 		return pool.starmap(download,jobs)
 		
-'''
-def get_SDO_imgs(sT, eT, dT, instrument="AIA", wave=None, outdir="./SDO"):
-	"""Get AIA or HMI maps using Multiwb_datamine.find_coobs; save selected FITS.
-
-	Required: UTC sT/eT, positive cadence dT in seconds. instrument is 'AIA'
-	(default; wave must be an AIA wavelength in Angstrom supplied as float) or for 
-	'HMI' (wave='magnetogram','dopplergram','continuum'). 
-	outdir holds finished FITS; outdir/raw_SDO holds downloads.
-
-	Returns time-sorted SunPy Maps.
-	AIA preparation belongs to find_coobs; this wrapper does not repeat it.
-	"""
-	cache_dir = Path(outdir).expanduser().resolve() / 'raw_SDO'
-	instrument = instrument.upper()
-	if instrument not in ('AIA', 'HMI'):
-		raise ValueError("instrument must be 'AIA' or 'HMI'")
-	if instrument == 'AIA' and wave not in _helper.AIA_WAVES:
-		raise ValueError(f"wave must be one of {_helper.AIA_WAVES}")
-	if instrument == 'HMI' and wave not in (None,'magnetogram','dopplergram','continuum'):
-		raise ValueError('wave must be None or magnetogram, dopplergram or continuum.')
-	if instrument == 'HMI':
-		if wave is None:
-			wave='magnetogram'
-
-	_helper._target_times(sT, eT, dT)
-	fetch = find_coobs
-	folder = Path(cache_dir).expanduser().resolve() / 'Multiwb'
-	folder.mkdir(parents=True, exist_ok=True)
-	cwd = os.getcwd()
-	try:
-		fetch(sT, eT, [instrument],
-		 [[float(wave) * u.angstrom]] if instrument == 'AIA' else [[]],
-		 outdir=str(folder) + os.sep, downdata=True, dT=float(dT),
-		 HMI_product=wave if instrument == 'HMI' else None)
-	finally:
-		os.chdir(cwd)
-	files = _helper._matching_files([folder / instrument], instrument, wave)
-	_, paths = _helper._series(instrument, wave, sT, eT, dT, cache_dir, files=list(files))
-	maps = [sunpy.map.Map(p) for p in paths]
-	return _helper._save_maps(maps, outdir, instrument + (str(wave) if wave is not None else ''))
-'''
-
 def get_EIT_imgs(sT, eT, dT, wave, outdir='./EIT',
   archive_url='https://lasco6.nascom.nasa.gov/pub/eit/l1/'):
 	"""Return and save calibrated official EIT Level-1 SunPy Maps.
@@ -2035,6 +2238,100 @@ def get_EIT_imgs(sT, eT, dT, wave, outdir='./EIT',
 			raise ValueError(f'{path}: not the requested EIT wavelength')
 		_helper._require_eit_level1(m, path)
 		maps.append(m)
+	_save_image_previews(maps,folder/'PNGs','EIT',wave)
 	return _helper._save_maps(maps, folder, 'EIT' + str(wave))
 
+def _stereo_job(sT,eT,dT,spacecraft,instrument,wave,outdir,polar=0):
+	"""One get_STEREO_imgs job: HI route for HI1, SSC/VSO series otherwise."""
+	if instrument=='HI1':
+		return _helper._hi_series(sT,eT,dT,spacecraft,instrument,outdir)
+	return _helper._stereo_series(sT,eT,dT,spacecraft,instrument,wave,outdir,polar)
 
+def get_STEREO_imgs(sT,eT,dT,spacecraft='A',instruments=['COR2'], waves=None,outdir='./STEREO',nproc=4,polar=0,helioviewer=True):
+	'''
+	Get STEREO FITS images in parallel for instrument-wave combinations.
+
+	spacecraft: 'A' or 'B'.
+	instruments: EUVI, COR1, COR2 or HI1; a string or a sequence.
+	waves: one entry per instrument, e.g. [[171,195],None,None].
+		waves=None selects all four EUVI bands.
+	nproc: number of FITS download workers; 1 runs serially.
+	polar: COR1 FITS polarizer angle, 0/120/240 degrees.
+	COR2: total-brightness only (POLAR=1001); single-polarizer files are skipped.
+	helioviewer: save original JP2 previews for missing cadence bins.
+	HI1: route Level-1 -> Helioviewer -> Level-0.5, like COR2. Level-1 HI
+		(hi_prep DN/s, MSB or S10) is only at UKSSDC behind a registered
+		login, so local Level-1 files under STEREO_<sc>/HI1 (e.g. raw/level1)
+		are used first; Helioviewer has no HI source (step reported and
+		skipped); otherwise Level-0.5 science sums (s*h1*.fts, N_IMAGES>1)
+		come from SSC/VSO into STEREO_<sc>/HI1/maps. Bins are
+		max(dT, 2400 s), the HI1 science cadence.
+
+	Returns one time-sorted list of FITS-based Maps per combination.
+	JP2s are saved separately and are not returned as Maps.
+	'''
+	_helper._target_times(sT,eT,dT)
+	spacecraft=str(spacecraft).strip().upper()
+	if spacecraft not in ('A','B'):
+		raise ValueError("spacecraft must be 'A' or 'B'.")
+	if isinstance(instruments,str):
+		instruments=[instruments]
+	instruments=[str(i).strip().upper() for i in instruments]
+	if any(i not in ('EUVI','COR1','COR2','HI1') for i in instruments):
+		raise ValueError("instruments must contain EUVI, COR1, COR2 or HI1.")
+	if int(nproc)!=nproc or nproc<1:
+		raise ValueError('nproc must be a positive integer.')
+	if 'COR1' in instruments and polar not in (0,120,240):
+		raise ValueError('COR1 polar must be 0, 120 or 240 degrees.')
+
+	if waves is None:
+		waves=[[171,195,284,304] if i=='EUVI' else None
+			for i in instruments]
+	if len(instruments)!=len(waves):
+		raise ValueError('instruments and waves must have matching lengths.')
+
+	jobs=[]
+	for instrument,products in zip(instruments,waves):
+		if instrument=='EUVI':
+			if products is None:
+				raise ValueError('Supply EUVI wavelengths, e.g. [171,195].')
+			if np.isscalar(products):
+				products=[products]
+			products=list(products)
+			if not products or any(w not in (171,195,284,304) for w in products):
+				raise ValueError('EUVI wavelengths must be 171, 195, 284 or 304.')
+		else:
+			products=[None]
+		for wave in products:
+			job=(sT,eT,dT,spacecraft,instrument,wave,outdir,polar)
+			if job not in jobs:
+				jobs.append(job)
+
+	if not jobs:
+		return []
+	workers=min(int(nproc),len(jobs))
+	if workers==1:
+		results=[_stereo_job(*job) for job in jobs]
+	else:
+		with Pool(workers) as pool:
+			results=pool.starmap(_stereo_job,jobs)
+
+	for job,maps in zip(jobs,results):
+		instrument,wave=job[4:6]
+		product=Path(outdir).expanduser().resolve()/f'STEREO_{spacecraft}'/instrument
+		if instrument=='EUVI':product=product/str(int(wave))
+		_save_image_previews(maps,product/'PNGs',instrument,wave)
+	if helioviewer:
+		root=Path(outdir).expanduser().resolve()/f'STEREO_{spacecraft}'
+		for job,maps in zip(jobs,results):
+			instrument,wave=job[4:6]
+			if instrument=='HI1':continue  # no Helioviewer HI source
+			product=root/instrument
+			if instrument=='EUVI':
+				product=product/str(int(wave))
+			jp2s=_helper._fill_helioviewer_jp2(
+				sT,eT,dT,[],product/'raw'/'helioviewer',
+				instrument,wave,spacecraft)
+			_save_image_previews(jp2s,product/'raw'/'helioviewer',instrument,wave)
+
+	return results

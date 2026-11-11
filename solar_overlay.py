@@ -112,6 +112,7 @@ def build_pfss(sT, eT, outdir, rss=2.5, nrho=35, r_seed=1.05, n_lon=36, n_lat=18
         meta.setdefault("cunit2", str(gmap.spatial_units.axis2))
         if str(meta.get("bunit", "")).lower() == "gauss":
             meta["bunit"] = "G"
+        _overlay_helper._helper._add_rsun_ref(meta)  # GONG headers lack RSUN_REF; write it explicitly
         gmap = sunpy.map.Map(data - data.mean(), meta)
     pout = pfsspy.pfss(pfsspy.Input(gmap, nrho, rss))
 
@@ -202,12 +203,15 @@ def overlay(datasets, sT, eT, dT, diffs=None, diff_types=None, outdir="./",
     reference_search: maximum search distance from an external reference time,
                  in seconds (default 3600). Missing references raise an error;
                  the event boundary is never substituted.
-    alpha      : maximum opacity of the upper layers (image layers beyond the first are
-                 weighted by their own intensity, so two AIA bands stay legible)
+    alpha      : opacity of upper layers. EUV intensity, HMI and signed differences
+                 have uniform opacity; other intensity layers retain brightness weighting.
     local_files: optional dict {dataset: list of FITS paths}, e.g. files already
                  downloaded by Multiwb_datamine.find_coobs(). Missing keys raise unless download=True. Prepared AIA inputs are not calibrated twice.
     N_Bloop    : PFSS only; np.nan = all closed loops, integer = keep the highest
                  N visible closed loops, 0 = open lines only.
+    Local LASCO files are first reduced to one product family by the route
+                 Level-1 -> Helioviewer -> Level-0.5 (need_LASCO_calib=True) or
+                 Level-1 -> Level-0.5 -> Helioviewer (False); see _route_family.
     need_LASCO_calib: False (default) prepares available LASCO as DN/s previews;
                  True uses get_LASCO_imgs for missing inputs (Level-1 -> JP2 ->
                  DN/s), or calib_LASCO for local inputs (optional SolarSoft ->
@@ -292,17 +296,26 @@ def overlay(datasets, sT, eT, dT, diffs=None, diff_types=None, outdir="./",
             raise ValueError(f'Missing local FITS for {name}; retrieve them with Multiwb_datamine first.')
         if kind == "LASCO":
             lasco_outdir = Path(cache_dir) / 'prepared' / ('LASCO_' + key)
+            if files is not None:
+                # One product family by the route Level-1 -> Helioviewer -> Level-0.5
+                # (Level-0.5 before Helioviewer when need_LASCO_calib=False).
+                files = _overlay_helper._route_family(files, sT, eT, dT, bool(need_LASCO_calib))
             if files is None:
                 prepared = _overlay_helper._datamine.get_LASCO_imgs(sT, eT, dT, key,
                     outdir=lasco_outdir, need_calib=need_LASCO_calib)
             else:
                 _, selected = _overlay_helper._series('LASCO', key, sT, eT, dT,
                     cache_dir, files=files)
-                if need_LASCO_calib:
+                loaded = [_overlay_helper._helper.load_map(path) for path in selected]
+                if need_LASCO_calib and not all(_overlay_helper._helper._lasco_science_ready(m) or
+                        m.meta.get('ov_hv', False) for m in loaded):
                     prepared = _overlay_helper._datamine.calib_LASCO(list(selected),
                         instr=key, outdir=lasco_outdir)
+                elif need_LASCO_calib:
+                    # Level-1 or Helioviewer family: final already; no recalibration.
+                    prepared = [_overlay_helper._helper._prepare_lasco(m, key) for m in loaded]
                 else:
-                    prepared = [_overlay_helper._helper._prepare_lasco(sunpy.map.Map(path), key)
+                    prepared = [_overlay_helper._helper._prepare_lasco(_overlay_helper._helper.load_map(path), key)
                                 for path in selected]
                     prepared = _overlay_helper._helper._save_maps(prepared,
                         lasco_outdir / 'maps', 'LASCO_' + key)
@@ -312,7 +325,7 @@ def overlay(datasets, sT, eT, dT, diffs=None, diff_types=None, outdir="./",
             times = [m.date for m in prepared]
             paths = [Path(cache_dir).expanduser().resolve() / 'prepared' / ('LASCO_' + key) /
                      f"maps/LASCO_{key}_{m.date.strftime('%Y%m%dT%H%M%S%f')}.fits" for m in prepared]
-            loader = sunpy.map.Map
+            loader = _overlay_helper._helper.load_map
             z = 0 if key == "C3" else 1
         elif kind == "AIA":
             if files is None:
@@ -322,11 +335,14 @@ def overlay(datasets, sT, eT, dT, diffs=None, diff_types=None, outdir="./",
                 files = _overlay_helper._matching_files([Path(cache_dir) / 'prepared' / f'AIA{key}'], kind, key)
             times, paths = _overlay_helper._series("AIA", key, sT, eT, dT, cache_dir, files=files)
             for path in paths:
+                if _overlay_helper._is_preview_image(_overlay_helper._helper.load_map(path),path):
+                    warnings.warn(f'{path}: using a Helioviewer display preview, not calibrated AIA counts.')
+                    continue
                 meta = sunpy.map.Map(path).meta
                 if not (float(meta.get('lvl_num', 0)) >= 1.5 or
                         any(v in str(meta.get('series', '')).lower() for v in ('lev1.5', 'lev15'))):
                     raise ValueError('overlay requires prepared AIA Level-1.5 FITS')
-            loader, z = sunpy.map.Map, 3 + n_aia
+            loader, z = _overlay_helper._helper.load_map, 3 + n_aia
             n_aia += 1
         elif kind == 'EIT':
             if files is None:
@@ -334,8 +350,8 @@ def overlay(datasets, sT, eT, dT, diffs=None, diff_types=None, outdir="./",
                 files = _overlay_helper._matching_files([Path(cache_dir) / f'EIT{key}'], kind, key)
             times, paths = _overlay_helper._series('EIT', key, sT, eT, dT, cache_dir, files=files)
             for path in paths:
-                _overlay_helper._require_eit_level1(sunpy.map.Map(path), path)
-            loader, z = sunpy.map.Map, 3 + n_aia
+                _overlay_helper._require_eit_level1(_overlay_helper._helper.load_map(path), path)
+            loader, z = _overlay_helper._helper.load_map, 3 + n_aia
             n_aia += 1
         else:
             if files is None:
@@ -386,7 +402,7 @@ def overlay(datasets, sT, eT, dT, diffs=None, diff_types=None, outdir="./",
                     warnings.warn(f'{name}: predecessor retrieval failed: {exc}')
                     maps = []
                 for m in maps:
-                    m = sunpy.map.Map(m)
+                    m = _overlay_helper._helper.load_map(m)
                     if lo <= m.date <= hi:
                         candidates.append((m.date, m))
             if not candidates and typ == 'running':
@@ -399,7 +415,9 @@ def overlay(datasets, sT, eT, dT, diffs=None, diff_types=None, outdir="./",
             if candidates:
                 reference_time, reference = min(candidates,
                     key=lambda item: abs((item[0] - base).to_value(u.s)))
-                refmap = sunpy.map.Map(reference)
+                refmap = _overlay_helper._helper.load_map(reference)
+                if _overlay_helper._is_preview_image(refmap,reference):
+                    _overlay_helper._helper._hv_tags(refmap.meta)  # canonical Helioviewer tags
                 if kind == 'LASCO':
                     if need_LASCO_calib:
                         refmap = _overlay_helper._datamine.calib_LASCO(
@@ -408,7 +426,7 @@ def overlay(datasets, sT, eT, dT, diffs=None, diff_types=None, outdir="./",
                         refmap = _overlay_helper._helper._prepare_lasco(refmap, key)
                 elif kind == 'EIT':
                     _overlay_helper._require_eit_level1(refmap, reference)
-                elif kind == 'AIA':
+                elif kind == 'AIA' and not _overlay_helper._is_preview_image(refmap,reference):
                     meta = refmap.meta
                     if not (float(meta.get('lvl_num', 0)) >= 1.5 or
                             any(v in str(meta.get('series', '')).lower() for v in ('lev1.5', 'lev15'))):

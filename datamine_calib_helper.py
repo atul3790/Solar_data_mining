@@ -8,6 +8,7 @@ No downloads, calibration runs or directory changes occur on import.
 import copy
 import re
 import shutil
+import time
 import urllib.request
 import warnings
 from pathlib import Path
@@ -18,6 +19,10 @@ from astropy import units as u
 from astropy.io import fits
 from astropy.table import Table
 from astropy.time import Time
+from astropy.coordinates import SkyCoord
+from astropy.visualization import ImageNormalize, AsinhStretch, PowerStretch
+from matplotlib.colors import Normalize
+from sunpy.visualization import colormaps as _sunpy_cmaps
 import sunpy.map
 from sunpy.map import all_coordinates_from_map
 from sunpy.net import Fido, attrs as a
@@ -30,6 +35,39 @@ LASCO_FOV = {"C2": (2.4, 6.0), "C3": (3.8, 30.0)}
 
 
 LASCO_STD = {"C2": ("orange", "clear"), "C3": ("clear", "clear")}
+
+
+def _image_display_settings(m,instrument,product=None,preview=False):
+	"""Instrument colours and native Map stretch; limits from source pixels.
+
+	EUV FITS use a copy of Map.plot_settings['norm'] with 1--99.9 percentile
+	limits to retain faint disk emission and bright flare cores. Display JP2
+	pixels stay linear (already stretched). Input data/metadata are unchanged.
+	"""
+	kind=str(instrument).upper()
+	data=np.asarray(m.data,float)
+	valid=np.isfinite(data)
+	if m.mask is not None:valid&=~np.asarray(m.mask,bool)
+	values=data[valid]
+	if not values.size:raise ValueError('No finite unmasked image pixels.')
+	preview=preview or bool(m.meta.get('ov_hv',False))
+	if kind in ('AIA','EUVI','EIT'):
+		wave=int(float(product)) if product is not None else int(round(m.wavelength.to_value(u.angstrom)))
+		cmap=('sdoaia' if kind=='AIA' else 'euvi' if kind=='EUVI' else 'sohoeit')+str(wave)
+	else:
+		cmap=m.plot_settings.get('cmap','gray')
+	if preview:
+		lo,hi=(0.,255.) if values.min()>=0 and values.max()<=255 else (float(values.min()),float(values.max()))
+		norm=Normalize(vmin=lo,vmax=max(hi,lo+np.finfo(float).eps),clip=True)
+	else:
+		norm=copy.deepcopy(m.plot_settings.get('norm'))
+		if norm is None:
+			norm=ImageNormalize(stretch=PowerStretch(.25) if kind=='EUVI' else AsinhStretch(.01))
+		lo,hi=np.percentile(values,[1,99.9])
+		norm.vmin=float(lo)
+		norm.vmax=float(hi) if hi>lo else float(lo)+1.
+		norm.clip=True
+	return cmap,norm
 
 
 @contextmanager
@@ -57,6 +95,8 @@ def _target_times(sT, eT, dT) -> Time:
 
 def _hdr_time(path) -> Time:
     """Observation time from the first HDU that has DATE-OBS."""
+    if Path(path).suffix.lower() in (".jp2", ".j2k"):
+        return sunpy.map.Map(path).date
     with fits.open(path) as hl:
         for hdu in hl:
             h = hdu.header
@@ -80,6 +120,10 @@ def _search(t_lo, t_hi, attrs, sample=None):
     return max(tabs, key=len)
 
 
+DOWNLOAD_RETRIES = 3       # Fido/VSO attempts per record
+DOWNLOAD_BACKOFF_S = 10.   # wait grows 10 s, 20 s between attempts
+
+
 def _download(rows, cache: Path):
     cache.mkdir(parents=True, exist_ok=True)
     if "Archive URL" in rows.colnames:
@@ -97,10 +141,24 @@ def _download(rows, cache: Path):
                 temp.unlink(missing_ok=True)
                 warnings.warn(f"Skipping failed archive download {url}: {exc}")
         return files
-    files = Fido.fetch(rows, path=str(cache / "{file}"))
-    if getattr(files, "errors", None):
-        warnings.warn(f"{len(files.errors)} download(s) failed; they will be skipped.")
-    return [str(f) for f in files]
+    # VSO/SSC answer intermittently with 504s or dropped connections; retry
+    # with back-off before giving up on these records (DOWNLOAD_RETRIES tries).
+    last = None
+    for attempt in range(DOWNLOAD_RETRIES):
+        try:
+            files = Fido.fetch(rows, path=str(cache / "{file}"))
+            if getattr(files, "errors", None) and not len(files):
+                raise RuntimeError(f"{len(files.errors)} download error(s): {files.errors[0]}")
+            if getattr(files, "errors", None):
+                warnings.warn(f"{len(files.errors)} download(s) failed; they will be skipped.")
+            return [str(f) for f in files]
+        except Exception as exc:
+            last = exc
+            if attempt + 1 < DOWNLOAD_RETRIES:
+                wait = DOWNLOAD_BACKOFF_S * (attempt + 1)
+                print(f"Download attempt {attempt + 1}/{DOWNLOAD_RETRIES} failed ({exc}); retrying in {wait:.0f} s")
+                time.sleep(wait)
+    raise last
 
 
 def _lasco_archive_search(t_lo, t_hi, instr):
@@ -348,6 +406,25 @@ def _lasco_level1_ok(path, instr, strict=True):
 	return (level >= 1 or processed) and unit in ('msb', 'bsun', 'b_sun', 'meansolarbrightness')
 
 
+def _lasco_obstime(m):
+	"""Combine split LASCO DATE_OBS/TIME_OBS for WCS, without editing input data.
+
+	SunPy LASCOMap.date combines them, but reference_date can otherwise use
+	midnight. Leave other instruments and already complete timestamps alone.
+	"""
+	if 'LASCO' not in (str(m.meta.get('instrume',''))+' '+str(m.meta.get('detector',''))).upper():
+		return m
+	date=str(m.meta.get('date-obs',m.meta.get('date_obs',''))).strip()
+	if len(date)!=10 or not m.meta.get('time-obs',m.meta.get('time_obs')):
+		return m
+	meta=copy.deepcopy(m.meta)
+	meta['date-obs']=m.date.utc.isot
+	if 'date_obs' in meta:meta['date_obs']=meta['date-obs']
+	fixed=sunpy.map.Map(m.data,meta,mask=m.mask)
+	fixed.plot_settings=copy.deepcopy(m.plot_settings)
+	return fixed
+
+
 def _prepare_lasco(m, instr=None):
     """
     LASCO quick-look preparation: exposure normalisation (DN/s) and masking of
@@ -357,11 +434,15 @@ def _prepare_lasco(m, instr=None):
     distortion or photometric (MSB) calibration). Use calib_LASCO() for full
     calibration; this helper performs no full radiometric corrections.
     """
+    m = _lasco_obstime(m)
+    if _lasco_science_ready(m):
+        return m  # Verified Level-1 MSB: geometry and brightness are final.
     instr = (instr or str(m.meta.get("detector", ""))).upper()
     lo, hi = LASCO_FOV[instr]
     data = m.data.astype(np.float32)
     meta = copy.deepcopy(m.meta)
     meta.pop("blank", None)  # Integer-only FITS keyword is invalid for floating data.
+    _add_soho_observer(meta, m.date)  # Saved FITS carry SOHO's real position.
     unit = str(m.meta.get("bunit") or m.unit).replace(" ", "").lower()
     calibrated = unit in ("msb", "bsun", "b_sun", "meansolarbrightness")
     if not calibrated and not meta.get("ov_norm", False) and unit not in ("dn/s", "ct/s"):
@@ -376,7 +457,7 @@ def _prepare_lasco(m, instr=None):
     xy = all_coordinates_from_map(m)
     rho = np.hypot(xy.Tx.to_value(u.arcsec), xy.Ty.to_value(u.arcsec)) / m.rsun_obs.to_value(u.arcsec)
     data[(rho < lo) | (rho > hi)] = np.nan
-    if not calibrated:
+    if not calibrated and not meta.get("ov_hv", False):  # Helioviewer keeps its canonical tags.
         meta["ov_cal"] = "exposure/FOV only; not full Level 1"
     with _quiet():
         return sunpy.map.Map(data, meta)
@@ -554,32 +635,20 @@ def _get_lasco_source(sT, eT, dT, instr, cache_dir, source, outdir=None,
             from hvpy.datasource import DataSource
         except ImportError as exc:
             raise ImportError('Helioviewer LASCO retrieval needs hvpy; JP2 reading needs glymur and OpenJPEG.') from exc
-        targets = _target_times(sT, eT, dT)
         folder = Path(cache_dir).expanduser().resolve() / ('helioviewer_' + instr)
-        folder.mkdir(parents=True, exist_ok=True)
-        source_id = getattr(DataSource, 'LASCO_' + instr).value
         selected = {}
-        for target in targets:
-            path = folder / f"LASCO_{instr}_{target.strftime('%Y%m%dT%H%M%S')}.jp2"
-            if not path.exists():
-                payload = hvpy.getJP2Image(target.datetime, source_id)
-                staged = path.with_suffix('.jp2.part')
-                staged.write_bytes(payload)
-                staged.replace(path)
+        # Shared fetcher: one JP2 per cadence bin, cache reused, one inward retry at edges.
+        for path in _fill_helioviewer_jp2(sT, eT, dT, [], folder, 'LASCO', instr):
             image = sunpy.map.Map(path)
             if not _parse_time(sT) <= image.date <= _parse_time(eT):
                 continue
             if image.date.isot in selected:
                 continue
-            meta = copy.deepcopy(image.meta)
+            meta = _hv_tags(copy.deepcopy(image.meta), path)  # Canonical tags; roll 0.
             meta['instrume'], meta['detector'] = 'LASCO', instr
-            meta['bunit'] = 'ct'  # Display counts, not reconstructed MSB or raw DN.
-            meta['ov_hv'], meta['ov_norm'] = True, True
-            meta['ov_src'] = 'Helioviewer JP2'
-            meta.pop('ov_full', None)
+            _add_soho_observer(meta, image.date)
             prepared = sunpy.map.Map(image.data, meta)
             prepared = _prepare_lasco(prepared, instr) if calibrate else prepared
-            prepared.meta['ov_cal'] = 'Helioviewer visualization; not photometric FITS'
             selected[image.date.isot] = prepared
         if not selected:
             raise RuntimeError('No Helioviewer LASCO observations inside the requested interval.')
@@ -616,16 +685,255 @@ def _lasco_notice(images):
 			'vignetting, geometric-distortion and radiometric corrections; exposure normalization alone is insufficient.')
 
 
+def jp2_to_fits(jp2_paths, outdir, skip_times=(), tolerance=1.0):
+	"""Convert Helioviewer JP2s to FITS (maps_HV); return the FITS paths.
+
+	Pixels are kept as Helioviewer display values (0-255, BUNIT='ct'); the
+	embedded header gives the WCS, with roll 0 because Helioviewer pixels are
+	north-up (old value in OV_ROLL). Spacecraft observer keys are retained.
+	LASCO also gets the occulter/FOV mask. Tags: OV_HV, OV_SRC, OV_CAL.
+	skip_times: observation Times already held as Helioviewer FITS elsewhere.
+	Existing outputs are reused. Display products: morphology and motion only.
+	"""
+	folder = Path(outdir).expanduser().resolve()
+	skip = [_parse_time(t) for t in skip_times]
+	out = []
+	for path in jp2_paths:
+		try:
+			m = load_map(path)
+			if any(abs((m.date - t).to_value(u.s)) <= tolerance for t in skip):
+				continue
+			meta = copy.deepcopy(m.meta)
+			meta.pop('helioviewer', None)  # JP2-only XML block; not FITS-safe.
+			det = str(meta.get('detector', '')).strip().upper()
+			ins = str(meta.get('instrume', '')).strip().upper()
+			obs = re.sub(r'[^A-Z0-9]', '', str(meta.get('obsrvtry', meta.get('telescop', ''))).upper())
+			if 'LASCO' in ins + det or det in LASCO_FOV:
+				meta['instrume'], meta['detector'] = 'LASCO', det
+				name = f'LASCO_{det}'
+			elif det in ('EUVI', 'COR1', 'COR2'):
+				name = f"STEREO_{'A' if obs.endswith(('A', 'AHEAD')) else 'B'}_{det}"
+				if det == 'EUVI':
+					name += f'_{int(round(m.wavelength.to_value(u.angstrom)))}'
+			elif 'HMI' in ins:
+				name = 'HMI_' + ('continuum' if 'continuum' in str(meta.get('content', '')).lower() else 'magnetogram')
+			elif 'AIA' in ins:
+				name = f'AIA_{int(round(m.wavelength.to_value(u.angstrom)))}'
+			else:
+				name = re.sub(r'[^A-Za-z0-9]', '', ins or 'IMG')
+			_hv_tags(meta, path)  # Same canonical tags as every other JP2 -> FITS route.
+			_add_rsun_ref(meta)
+			target = folder / f"{name}_HV_{m.date.strftime('%Y%m%dT%H%M%S%f')}.fits"
+			if not target.exists():
+				folder.mkdir(parents=True, exist_ok=True)  # Only when something is written.
+				with _quiet():
+					hv = sunpy.map.Map(m.data, meta)
+					if name.startswith('LASCO'):
+						hv = _prepare_lasco(hv, det)
+					hv.save(target)
+			out.append(target)
+		except Exception as exc:
+			warnings.warn(f'Cannot convert {path} to FITS: {exc}')
+	return sorted(out)
+
+
 def _load_hmi(path):
-    with _quiet():
-        return sunpy.map.Map(path)
+    return load_map(path)
+
+
+def _hv_north_up(meta):
+	"""Helioviewer JP2 pixels are already rotated to solar north.
+
+	Their headers keep the original CROTA, which SunPy ignores only while the
+	JP2-only 'helioviewer' key exists; FITS saving drops that key. Zero the
+	roll in the header (original kept in OV_ROLL) so the WCS stays truthful.
+	"""
+	roll = next((meta[k] for k in ('crota2', 'crota', 'crota1') if k in meta), None)
+	if roll is not None and 'ov_roll' not in meta:
+		meta['ov_roll'] = float(roll)
+	for k in ('crota', 'crota1', 'crota2'):
+		if k in meta:
+			meta[k] = 0.0
+	for k, v in (('pc1_1', 1.), ('pc1_2', 0.), ('pc2_1', 0.), ('pc2_2', 1.)):
+		if k in meta:
+			meta[k] = v
+	return meta
+
+
+HV_TAGS = {'bunit': 'ct', 'ov_hv': True, 'ov_norm': True, 'ov_src': 'Helioviewer JP2',
+	'ov_cal': 'Helioviewer visualization; not photometric FITS'}
+
+
+def _hv_tags(meta, jp2_path=None):
+	"""Give a Helioviewer-derived image the one canonical identity/unit tag set.
+
+	Every JP2 -> FITS conversion (module, overlay and flow code) uses this, so
+	they share exactly the same OV_HV, OV_SRC, OV_CAL, OV_NORM and BUNIT and
+	form one product family. Roll is set to 0 (old value in OV_ROLL).
+	"""
+	meta.pop('helioviewer', None)  # JP2-only XML block; not FITS-safe.
+	for key in ('ov_full', 'ov_calsr'):
+		meta.pop(key, None)
+	meta.update(HV_TAGS)
+	if jp2_path is not None:
+		meta['ov_jp2'] = Path(jp2_path).name
+	return _hv_north_up(meta)
+
+
+SOHO_ORBIT_URL = 'https://soho.nascom.nasa.gov/data/ancillary/orbit/predictive/{year}/'
+SOHO_ORBIT_CACHE = Path.home() / '.cache' / 'solar_data_mining' / 'soho_orbit'
+L1_DISTANCE_KM = 1.5e6
+_soho_days = {}
+
+
+def _soho_orbit_day(day):
+	"""(Time array, GSE x/y/z km) of SOHO for one UTC day from the SOHO orbit file.
+
+	Uses the highest-version SO_OR_PRE_YYYYMMDD_Vnn.FITS (10-min samples),
+	cached in ~/.cache/solar_data_mining/soho_orbit. Returns None if unavailable.
+	"""
+	tag = day.strftime('%Y%m%d')
+	if tag in _soho_days:
+		return _soho_days[tag]
+	result = None
+	try:
+		SOHO_ORBIT_CACHE.mkdir(parents=True, exist_ok=True)
+		cached = sorted(SOHO_ORBIT_CACHE.glob(f'SO_OR_PRE_{tag}_V*.FITS'))
+		if not cached:
+			url = SOHO_ORBIT_URL.format(year=day.strftime('%Y'))
+			with urllib.request.urlopen(url, timeout=30) as src:
+				names = sorted(set(re.findall(rf'SO_OR_PRE_{tag}_V\d+\.FITS', src.read().decode('utf-8', 'replace'))))
+			if names:
+				target = SOHO_ORBIT_CACHE / names[-1]
+				with urllib.request.urlopen(url + names[-1], timeout=60) as src:
+					target.write_bytes(src.read())
+				cached = [target]
+		if cached:
+			with fits.open(cached[-1]) as hl:
+				d = hl[1].data
+				t = Time([f'{y:04d}:{doy:03d}:00:00:00' for y, doy in zip(d['Year'], d['Day of year'])],
+					format='yday', scale='utc') + np.asarray(d['Ellapsed milliseconds of day'], float) * u.ms
+				xyz = np.vstack([d['GSE x (km)'], d['GSE y (km)'], d['GSE z (km)']]).astype(float)
+			result = (t, xyz)
+	except Exception as exc:
+		warnings.warn(f'SOHO orbit file for {tag} unavailable: {exc}')
+	_soho_days[tag] = result
+	return result
+
+
+def soho_observer(time):
+	"""SOHO position as a HeliographicStonyhurst SkyCoord, and its source text.
+
+	From the SOHO orbit file (GSE offset from Earth, interpolated in time);
+	if that is unavailable, the L1 approximation: Earth's direction, 1.5e6 km
+	sunward. SOHO's own roll/pointing are not involved: they are in CROTA/CRVAL.
+	"""
+	from sunpy.coordinates import frames as sframes
+	time = _parse_time(time)
+	samples = [_soho_orbit_day(time + k * u.day) for k in (-1, 0, 1)]
+	samples = [s for s in samples if s is not None]
+	if samples:
+		t = Time(np.concatenate([s[0].jd for s in samples]), format='jd', scale='utc')
+		xyz = np.hstack([s[1] for s in samples])
+		order = np.argsort(t.jd)
+		tj, xyz = t.jd[order], xyz[:, order]
+		if tj[0] <= time.jd <= tj[-1]:
+			gse = [np.interp(time.jd, tj, axis) for axis in xyz]
+			c = SkyCoord(*(gse * u.km), representation_type='cartesian',
+				frame=sframes.GeocentricSolarEcliptic(obstime=time))
+			return c.transform_to(sframes.HeliographicStonyhurst(obstime=time)), 'SOHO orbit file (GSE)'
+	c = SkyCoord(L1_DISTANCE_KM * u.km, 0 * u.km, 0 * u.km, representation_type='cartesian',
+		frame=sframes.GeocentricSolarEcliptic(obstime=time))
+	return c.transform_to(sframes.HeliographicStonyhurst(obstime=time)), 'L1 approximation (no SOHO orbit file)'
+
+
+def _is_soho(meta):
+	label = ' '.join(str(meta.get(k, '')) for k in ('telescop', 'obsrvtry', 'instrume', 'detector')).upper()
+	return 'SOHO' in label or 'LASCO' in label or 'EIT' in label
+
+
+def _add_soho_observer(meta, time):
+	"""Add SOHO HGLN/HGLT/DSUN_OBS and RSUN_REF when a SOHO header lacks them."""
+	if not _is_soho(meta) or all(k in meta for k in ('hgln_obs', 'hglt_obs', 'dsun_obs')):
+		return meta
+	obs, source = soho_observer(time)
+	meta.update({'hgln_obs': float(obs.lon.to_value(u.deg)), 'hglt_obs': float(obs.lat.to_value(u.deg)),
+		'dsun_obs': float(obs.radius.to_value(u.m)), 'ov_obs': source})
+	meta.setdefault('rsun_ref', 695700000.0)  # SunPy's standard photospheric radius, made explicit.
+	return meta
+
+
+def _is_helioviewer(meta):
+	"""Helioviewer JP2 or a FITS/difference derived from one."""
+	return (bool(meta.get('ov_hv', False)) or 'helioviewer' in str(meta.get('ov_src', '')).lower()
+		or 'helioviewer' in meta or any(str(k).lower().startswith('hv_') for k in meta))
+
+
+RSUN_REF_M = 695700000.  # IAU 2015 nominal solar radius (m); sunpy's default
+
+def _add_rsun_ref(meta):
+	"""Write RSUN_REF explicitly when a header lacks it; return True if added.
+
+	SECCHI Level-0.5 (COR1/COR2/HI/EUVI) and some JP2 headers give RSUN
+	(arcsec) but not RSUN_REF. Sunpy then silently assumes the nominal
+	radius; recording it in the header keeps the value visible and stable.
+	The provenance is kept in OV_RSREF.
+	"""
+	if meta.get('rsun_ref') not in (None, ''):
+		return False
+	meta['rsun_ref'] = RSUN_REF_M
+	meta['ov_rsref'] = 'RSUN_REF absent in source; IAU 2015 nominal radius written'
+	return True
+
+
+def load_map(source):
+	"""Load a FITS/JP2 path or Map with a truthful WCS, whatever its origin.
+
+	Single entry point for downloader, overlay and flow code. Archive FITS
+	(VSO/SDAC/SSC/JSOC, Level 0.5/1/1.5) already carry the correct roll in
+	CROTA/PC and pass unchanged. Helioviewer pixels are always north-up, so a
+	Helioviewer-derived image still carrying the spacecraft roll (files saved
+	before 2026-11-10) gets CROTA=0 in memory, old value in OV_ROLL. LASCO split
+	DATE-OBS/TIME-OBS is merged. SOHO images without an observer position get
+	SOHO's real position (orbit file; L1 approximation offline) and RSUN_REF.
+	Any other header without RSUN_REF gets the nominal radius written
+	(_add_rsun_ref). Consumers then only follow the WCS.
+	"""
+	with _quiet():
+		m = source if isinstance(source, sunpy.map.GenericMap) else sunpy.map.Map(source)
+	m = _lasco_obstime(m)
+	meta = m.meta
+	if _is_soho(meta) and not all(k in meta for k in ('hgln_obs', 'hglt_obs', 'dsun_obs')):
+		fixed = _add_soho_observer(copy.deepcopy(meta), m.date)
+		with _quiet():
+			m = sunpy.map.Map(m.data, fixed)
+		meta = m.meta
+	if _is_helioviewer(meta) and 'ov_roll' not in meta:
+		roll = any(abs(float(meta.get(k, 0) or 0)) > 1e-6 for k in ('crota', 'crota1', 'crota2'))
+		pc = abs(float(meta.get('pc1_2', 0) or 0)) > 1e-8 or abs(float(meta.get('pc2_1', 0) or 0)) > 1e-8
+		if roll or pc:
+			fixed = _hv_north_up(copy.deepcopy(meta))
+			with _quiet():
+				m = sunpy.map.Map(m.data, fixed)
+	if 'rsun_ref' not in m.meta:
+		fixed = copy.deepcopy(m.meta)
+		_add_rsun_ref(fixed)
+		with _quiet():
+			m = sunpy.map.Map(m.data, fixed)
+	return m
 
 
 def _save_maps(maps, outdir, prefix):
-	"""Write finished Maps with their complete WCS, retaining the original downloads."""
+	"""Write finished Maps with their complete WCS, retaining the original downloads.
+
+	Helioviewer-derived Maps are saved with the rotation SunPy used in memory,
+	so reloading the FITS never re-applies the spacecraft roll.
+	"""
 	folder = Path(outdir).expanduser().resolve()
 	folder.mkdir(parents=True, exist_ok=True)
 	for m in maps:
+		if 'helioviewer' in m.meta and np.allclose(m.rotation_matrix, np.eye(2)):
+			_hv_north_up(m.meta)
 		m.save(folder / f"{prefix}_{m.date.strftime('%Y%m%dT%H%M%S%f')}.fits", overwrite=True)
 	return maps
 
@@ -645,11 +953,326 @@ def _require_eit_level1(m, source):
 	if str(level).strip().upper() not in ('L1', '1', '1.0', 'LEVEL 1'):
 		raise ValueError(f'{source}: calibrated EIT Level-1 metadata is required')
 
+def _stereo_matches(m,spacecraft,instrument,wave,polar):
+	"""Check spacecraft, detector, wavelength and COR1 polarizer."""
+	obs=str(m.meta.get('obsrvtry',m.observatory)).upper()
+	obs=re.sub(r'[^A-Z0-9]','',obs)
+	if obs not in ('STEREO'+spacecraft,
+		'STEREO'+('AHEAD' if spacecraft=='A' else 'BEHIND')):
+		return False
+	if str(m.detector).strip().upper()!=instrument:
+		return False
+	if m.data.ndim!=2:
+		return False
+	if instrument=='EUVI':
+		return np.isclose(m.wavelength.to_value(u.angstrom),wave)
+	if instrument=='COR1':
+		return np.isclose(float(m.meta.get('polar',np.nan)),polar)
+	if instrument=='COR2':
+		# Total-brightness (d*c2 files, POLAR=1001) only; never mix in the
+		# single-polarizer n*c2 sequences, whose DN are not comparable.
+		return np.isclose(float(m.meta.get('polar',np.nan)),1001)
+	if instrument in ('HI1','HI2'):
+		# Level-0.5 science sequences only (onboard sums, N_IMAGES>1, s*h1 files);
+		# single full-resolution or 256-pixel engineering frames are skipped.
+		# Level-1 HI files are handled by _hi_level1_maps, never mixed in here.
+		return (int(m.meta.get('n_images',1) or 1)>1 and min(m.data.shape)>=512
+			and _hi_level(m.meta)=='0.5')
+	return True
 
+def _hi_level(meta):
+	"""'1' for HI Level-1/2 products (DN/s, MSB, S10 or hi_prep history), else '0.5'."""
+	unit=str(meta.get('bunit','')).strip().upper().replace(' ','')
+	if unit and unit not in ('DN','ADU','COUNTS','COUNT'):return '1'
+	level=str(meta.get('level',meta.get('data_lev',meta.get('lvl_num','')))).strip().upper()
+	if level.lstrip('L').startswith(('1','2')):return '1'
+	return '1' if 'hi_prep' in str(meta.get('history','')).lower() else '0.5'
+
+def _hi_level1_maps(sT,eT,dT,spacecraft,instrument,root):
+	"""Local HI Level-1 FITS under root, one per cadence bin (nearest DATE-OBS).
+
+	HI Level-1 (hi_prep: DN/s, MSB or S10) is distributed only by UKSSDC
+	(https://www.ukssdc.ac.uk/solar/stereo/data.html), which needs a registered
+	login, so it is not downloaded here. Files you fetch from there and place
+	anywhere under root (e.g. root/raw/level1) are used first.
+	Returns (maps, covered_bins, n_bins).
+	"""
+	targets=_target_times(sT,eT,dT)
+	start,end=_parse_time(sT),_parse_time(eT)
+	tolerance=float(dT)/2
+	found={}
+	for path in (_fits_paths(root) if root.is_dir() else []):
+		try:
+			h=fits.getheader(path)
+			if str(h.get('DETECTOR','')).strip().upper()!=instrument or _hi_level({k.lower():v for k,v in h.items()})!='1':continue
+			m=sunpy.map.Map(path)
+			obs=re.sub(r'[^A-Z0-9]','',str(m.meta.get('obsrvtry',m.observatory)).upper())
+			if obs not in ('STEREO'+spacecraft,'STEREO'+('AHEAD' if spacecraft=='A' else 'BEHIND')):continue
+			if start<=m.date<=end:found.setdefault(float(m.date.mjd),m)
+		except Exception as exc:
+			warnings.warn(f'Cannot use HI Level-1 candidate {path}: {exc}')
+	chosen={}
+	for t in targets:
+		near=[m for m in found.values() if abs((m.date-t).to_value(u.s))<=tolerance]
+		if near:
+			m=min(near,key=lambda m:abs((m.date-t).to_value(u.s)))
+			chosen[float(m.date.mjd)]=m
+	covered=sum(any(abs((m.date-t).to_value(u.s))<=tolerance for m in chosen.values()) for t in targets)
+	return [chosen[k] for k in sorted(chosen)],covered,len(targets)
+
+HI_CADENCE={'HI1':2400.,'HI2':7200.}  # nominal science cadence, seconds
+
+def _hi_series(sT,eT,dT,spacecraft,instrument,outdir):
+	"""HI route Level-1 -> Helioviewer -> Level-0.5, as for COR2.
+
+	Level-1: local files only (see _hi_level1_maps). Helioviewer: no HI
+	source exists there, so the step is reported and skipped. Level-0.5:
+	SSC/VSO through _stereo_series. Bins are max(dT, nominal HI cadence).
+	Returns the maps of one family: Level-1 if it covers every bin,
+	otherwise the family covering more bins (ties: Level-1).
+	"""
+	step=max(float(dT),HI_CADENCE[instrument])
+	root=Path(outdir).expanduser().resolve()/f'STEREO_{spacecraft}'/instrument
+	level1,covered,n=_hi_level1_maps(sT,eT,step,spacecraft,instrument,root)
+	print(f'STEREO_{spacecraft}/{instrument}: local Level-1 covers {covered}/{n} bins')
+	if covered==n:return level1
+	print(f'STEREO_{spacecraft}/{instrument}: Helioviewer has no HI source; '
+		'last fallback: SSC Level-0.5 DN')
+	l05=_stereo_series(sT,eT,step,spacecraft,instrument,None,outdir)
+	return level1 if covered>=len(l05) and level1 else l05
+
+def _fill_helioviewer_jp2(sT,eT,dT,maps,folder,instrument,wave=None,
+                         spacecraft='A'):
+	"""Save Helioviewer JP2s; return the saved JP2 paths in the window.
+
+	maps: FITS Maps already covering some bins; only the other bins are
+	requested. Pass [] to request a JP2 for every cadence bin.
+	instrument 'LASCO' takes wave='C2'/'C3'; files are LASCO_<det>_*.jp2,
+	other instruments hv<sourceId>_*.jp2. Cached JP2s are reused.
+	"""
+	targets=_target_times(sT,eT,dT)
+	start,end=_parse_time(sT),_parse_time(eT)
+	tolerance=float(dT)/2
+	fits_times=[m.date for m in maps]
+	missing=[t for t in targets if not any(
+		abs((obs-t).to_value(u.s))<=tolerance for obs in fits_times)]
+	if not missing:
+		return []
+
+	try:
+		import hvpy
+		from hvpy.datasource import DataSource
+	except ImportError:
+		warnings.warn('Helioviewer fallback requires hvpy.')
+		return []
+
+	if instrument=='LASCO':
+		source=getattr(DataSource,f'LASCO_{str(wave).upper()}',None)
+		source_id=source.value if source is not None else None
+	elif instrument=='AIA':
+		source=getattr(DataSource,f'AIA_{int(wave)}',None)
+		source_id=source.value if source is not None else None
+	elif instrument=='HMI':
+		source_id={'continuum':18,'magnetogram':19}.get(wave)
+	elif instrument=='EUVI':
+		source_id={171:20,195:21,284:22,304:23}[int(wave)]
+		if spacecraft=='B':
+			source_id+=4
+	elif instrument in ('COR1','COR2'):
+		source_id={('A','COR1'):28,('A','COR2'):29,
+		           ('B','COR1'):30,('B','COR2'):31}[spacecraft,instrument]
+	else:
+		source_id=None
+	if source_id is None:
+		warnings.warn(f'No Helioviewer fallback configured for {instrument}/{wave}.')
+		return []
+
+	folder=Path(folder)
+	folder.mkdir(parents=True,exist_ok=True)
+	prefix=f'LASCO_{str(wave).upper()}' if instrument=='LASCO' else f'hv{source_id}'
+	cached={}
+	for path in folder.glob(f'{prefix}_*.jp2'):
+		try:
+			obs=sunpy.map.Map(path).date
+			if start<=obs<=end:
+				cached[obs.isot]=(obs,path)
+		except Exception as exc:
+			warnings.warn(f'Cannot read cached JP2 {path}: {exc}')
+
+	selected={}
+	fits_epochs={obs.isot for obs in fits_times}
+	for target in missing:
+		near=[(obs,path) for obs,path in cached.values()
+		      if obs.isot not in fits_epochs
+		      and abs((obs-target).to_value(u.s))<=tolerance]
+		if near:
+			obs,path=min(near,key=lambda item:abs(
+				(item[0]-target).to_value(u.s)))
+			selected[obs.isot]=path
+			continue
+
+		staged=folder/f'.{prefix}_{target.strftime("%Y%m%dT%H%M%S")}.part.jp2'
+		request=target
+		for attempt in range(2):
+			# Helioviewer returns the image nearest the request; if that falls
+			# outside the window, retry once nudged half a tolerance inward.
+			try:
+				staged.write_bytes(hvpy.getJP2Image(request.datetime,source_id))
+				obs=sunpy.map.Map(staged).date
+				if not start<=obs<=end or abs((obs-target).to_value(u.s))>tolerance:
+					step=-1 if obs>target else 1
+					request=target+step*tolerance/2*u.s
+					if not start<=request<=end:
+						break
+					continue
+				if obs.isot in fits_epochs:
+					break
+				path=folder/f'{prefix}_{obs.strftime("%Y%m%dT%H%M%S%f")}.jp2'
+				if not path.exists():
+					staged.replace(path)
+				cached[obs.isot]=(obs,path)
+				selected[obs.isot]=path
+				break
+			except Exception as exc:
+				warnings.warn(f'Helioviewer {instrument}/{wave} at {target.isot}: {exc}')
+				break
+			finally:
+				staged.unlink(missing_ok=True)
+	return [selected[t] for t in sorted(selected)]
+
+def _stereo_series(sT,eT,dT,spacecraft,instrument,wave,outdir,polar=0):
+	"""Reuse local FITS; fetch missing cadence bins through Fido/VSO.
+
+	Returns time-sorted unique Maps. Keeps original metadata and pixels.
+	No SECCHI_PREP, exposure normalisation or polarization combination.
+	"""
+	targets=_target_times(sT,eT,dT)
+	start,end=_parse_time(sT),_parse_time(eT)
+	root=Path(outdir).expanduser().resolve()/f'STEREO_{spacecraft}'/instrument
+	if instrument=='EUVI':
+		root=root/str(int(wave))
+	raw=root/'raw'
+	finished=root/'maps'
+	raw.mkdir(parents=True,exist_ok=True)
+	finished.mkdir(parents=True,exist_ok=True)
+	tolerance=float(dT)/2
+	cached={}
+	selected={}
+	messages=[]
+
+	#### Read existing files first ####
+	for path in _fits_paths(root):
+		try:
+			m=sunpy.map.Map(path)
+			if not _stereo_matches(m,spacecraft,instrument,wave,polar):
+				continue
+			if start<=m.date<=end:
+				cached.setdefault(float(m.date.mjd),(m,path))
+		except Exception as exc:
+			messages.append(f'Cannot use {path}: {exc}')
+
+	missing=[]
+	for target in targets:
+		near=sorted(cached.values(),
+			key=lambda item:abs((item[0].date-target).to_value(u.s)))
+		if near and abs((near[0][0].date-target).to_value(u.s))<=tolerance:
+			m,path=near[0]
+			selected[float(m.date.mjd)]=(m,path)
+		else:
+			missing.append(target)
+
+	#### Search once, only if some bins are missing ####
+	tables=[]
+	if missing:
+		attrs=[a.Source(f'STEREO_{spacecraft}'),
+			a.Instrument('SECCHI'),a.Detector(instrument)]
+		if instrument=='EUVI':
+			attrs.append(a.Wavelength(float(wave)*u.angstrom))
+		if instrument!='COR1':
+			attrs.append(a.Physobs('intensity'))
+		try:
+			query=Fido.search(a.Time(start,end),*attrs)
+			tables=[tab for tab in query if len(tab)]
+		except Exception as exc:
+			messages.append(f'STEREO search failed: {exc}')
+
+	#### Try nearest records, then another provider if necessary ####
+	attempted=set()
+	for target in missing:
+		found=None
+		for provider,tab in enumerate(tables):
+			distance=np.abs((Time(tab['Start Time'])-target).to_value(u.s))
+			for index in np.argsort(distance):
+				index=int(index)
+				if distance[index]>tolerance:
+					break
+				record=(provider,index)
+				if record in attempted:
+					continue
+				attempted.add(record)
+				try:
+					paths=_download(tab[index:index+1],raw)
+					for path in paths:
+						m=sunpy.map.Map(path)
+						if not _stereo_matches(m,spacecraft,instrument,wave,polar):
+							continue
+						if not start<=m.date<=end:
+							continue
+						cached[float(m.date.mjd)]=(m,Path(path))
+				except Exception as exc:
+					messages.append(f'{target.isot}: download failed: {exc}')
+
+				near=sorted(cached.values(),
+					key=lambda item:abs((item[0].date-target).to_value(u.s)))
+				if near and abs((near[0][0].date-target).to_value(u.s))<=tolerance:
+					found=near[0]
+					break
+			if found is not None:
+				break
+		if found is None:
+			message=f'Missing STEREO_{spacecraft}/{instrument}: {target.isot}'
+			print(message)
+			messages.append(message)
+		else:
+			m,path=found
+			selected[float(m.date.mjd)]=(m,path)
+
+	#### Save selected Maps, preserving spacecraft geometry ####
+	maps=[]
+	for key in sorted(selected):
+		m,path=selected[key]
+		name=f'STEREO_{spacecraft}_{instrument}'
+		if instrument=='EUVI':
+			name+=f'_{int(wave)}'
+		elif instrument=='COR1':
+			name+=f'_pol{polar:g}'
+		destination=finished/f'{name}_{m.date.strftime("%Y%m%d_%H%M%S")}.fits'
+		meta=copy.deepcopy(m.meta)
+		if _add_rsun_ref(meta):
+			with _quiet():
+				m=sunpy.map.Map(m.data,meta)
+		if not destination.exists():
+			m.save(destination)
+		maps.append(m)
+		messages.append(
+			f'{m.date.isot} | input={path} | saved={destination} | '
+			f'level={m.processing_level} | unit={m.unit}')
+
+	log=root/'retrieval_log.txt'
+	with log.open('a') as stream:
+		stream.write(f'\nRequest: {start.isot} -- {end.isot}; dT={dT}s\n')
+		stream.write('\n'.join(messages)+'\n')
+	return maps
+	
 def _matching_files(directories, kind, key):
 	paths = []
 	for directory in directories:
-		for path in _fits_paths(directory):
+		root = Path(directory).expanduser().resolve()
+		candidates = list(_fits_paths(directory))
+		if kind in ('AIA', 'HMI') and root.is_dir():
+			candidates += sorted(p for p in root.rglob('*')
+				if p.suffix.lower() in ('.jp2', '.j2k'))
+		for path in candidates:
 			try:
 				m = sunpy.map.Map(path)
 				ins = str(m.instrument).upper()
@@ -667,8 +1290,8 @@ def _matching_files(directories, kind, key):
 			except (OSError, ValueError, KeyError, TypeError):
 				continue
 	if not paths:
-		raise FileNotFoundError(f'No {kind}/{key} FITS maps in supplied directories')
-	return sorted(set(paths))
+		raise FileNotFoundError(f'No {kind}/{key} maps in supplied directories')
+	return sorted(set(paths), key=lambda p: (p.suffix.lower() in ('.jp2', '.j2k'), str(p)))
 
 
 def _lasco_exposure_id(image):

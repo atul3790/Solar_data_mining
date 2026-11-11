@@ -29,6 +29,12 @@ from datamine_calib_helper import AIA_WAVES, _series,_load_hmi, _matching_files,
 import Multiwb_datamine as _datamine
 import datamine_calib_helper as _helper
 
+def _is_preview_image(m,path=None):
+	"""Identify JP2 display pixels, including previews retained in FITS containers."""
+	return (isinstance(path,(str,Path)) and Path(path).suffix.lower() in ('.jp2','.j2k') or
+		bool(m.meta.get('ov_hv',False)) or
+		'helioviewer' in str(m.meta.get('ov_src','')).lower())
+
 class _Layer:
 	"""One image layer; load on demand, align references, and colour the result."""
 	def __init__(self, label, kind, key, times, paths, loader, z, diff, dtype,
@@ -44,7 +50,8 @@ class _Layer:
 		self.base = min(range(len(self.times)),
 			key=lambda i: abs((self.times[i] - reference_time).to_value(u.s)))
 		self.cache = OrderedDict()
-		self.cmap = 'gray' if diff else ('RdBu_r' if kind == 'HMI' else
+		self.preview = all(isinstance(p, (str, Path)) and Path(p).suffix.lower() in ('.jp2', '.j2k') for p in paths)
+		self.cmap = 'gray' if diff else ('RdBu_r' if kind == 'HMI' and not self.preview else
 			(f'sdoaia{key}' if kind == 'AIA' else f'sohoeit{key}' if kind == 'EIT' else 'gray'))
 
 	def index_for(self, time):
@@ -53,44 +60,62 @@ class _Layer:
 
 	def processed(self, index, intensity=False):
 		if intensity:
-			return self.loader(self.paths[index])
+			current = _helper._lasco_obstime(self.loader(self.paths[index]))
+			self.preview = _is_preview_image(current,self.paths[index])
+			if self.kind == 'HMI':
+				self.cmap = 'gray' if self.preview else 'RdBu_r'
+			return current
 		for i in (index, self.base if self.dtype == 'base' else index - 1):
 			if not self.diff and i != index:
 				continue
 			if i < 0:
 				raise FileNotFoundError(f'{self.label}: running difference needs an earlier image')
 			if i not in self.cache:
-				self.cache[i] = self.loader(self.paths[i])
+				self.cache[i] = _helper._lasco_obstime(self.loader(self.paths[i]))
 			self.cache.move_to_end(i)
 		while len(self.cache) > 3:
 			self.cache.popitem(last=False)
 		current = self.cache[index]
+		self.preview = _is_preview_image(current,self.paths[index])
+		if self.kind == 'HMI' and not self.diff:
+			self.cmap = 'gray' if self.preview else 'RdBu_r'
 		if not self.diff:
 			return current
-		ref = self.cache[self.base if self.dtype == 'base' else index - 1]
+		ref_index = self.base if self.dtype == 'base' else index - 1
+		ref = self.cache[ref_index]
+		if self.preview != _is_preview_image(ref,self.paths[ref_index]):
+			raise ValueError(f'{self.label}: cannot subtract FITS and JP2 display products')
+		if not self.preview and str(current.unit) != str(ref.unit):
+			raise ValueError(f'{self.label}: difference FITS units do not match')
 		data = np.asarray(current.data, float) - _regrid(ref, current)
 		meta = copy.deepcopy(current.meta)
 		meta.pop('blank', None)
+		if self.preview:
+			meta.update({'ov_hv':True,'ov_src':'Helioviewer JP2 difference','bunit':'display'})
 		meta['diff_ref'], meta['diff_typ'] = ref.date.isot, self.dtype
 		meta['diff_dt'] = float((current.date - ref.date).to_value(u.s))
 		return sunpy.map.Map(data, meta)
 
-	def render(self, data, intensity=False):
+	def render(self, data, intensity=False, source=None):
+		cmap = self.cmap
 		data = np.asarray(data, float)
 		finite = np.isfinite(data)
 		values = data[finite]
-		if (self.diff and not intensity) or self.kind == 'HMI':
+		if (self.diff and not intensity) or (self.kind == 'HMI' and not self.preview):
 			limit = float(np.percentile(np.abs(values), 99)) if values.size else 1.
 			limit = max(limit, np.finfo(float).eps)
 			weight = np.clip(0.5 + data / (2 * limit), 0, 1)
+		elif self.kind in ('AIA','EUVI','EIT') and source is not None:
+			cmap, norm = _helper._image_display_settings(source,self.kind,self.key,self.preview)
+			weight = norm(np.ma.masked_invalid(data)).filled(0.)
 		else:
 			lo, hi = np.percentile(values, (1, 99.5)) if values.size else (0., 1.)
 			weight = np.clip((data - lo) / max(hi - lo, np.finfo(float).eps), 0, 1)
 			weight = np.arcsinh(10 * weight) / np.arcsinh(10.)
 		weight = np.where(finite, weight, 0.)
-		rgb = matplotlib.colormaps[self.cmap](weight)[..., :3]
-		# Magnetic polarities and signed differences need equal opacity.
-		return rgb, np.ones_like(weight) if (self.diff and not intensity) or self.kind == 'HMI' else weight, finite
+		rgb = matplotlib.colormaps[cmap](weight)[..., :3]
+		# Keep faint EUV disk emission visible; alpha sets the layer opacity.
+		return rgb, np.ones_like(weight) if (self.diff and not intensity) or self.kind in ('HMI','AIA','EUVI','EIT') else weight, finite
 
 
 @contextmanager
@@ -283,6 +308,7 @@ def _draw_pfss(ax, tmap, lines, lw=0.6, alpha=0.9,
 
 def _target_map(m, npix):
     """Common display grid: the lowest layer's map (down-sampled if it is huge)."""
+    m = _helper._lasco_obstime(m)
     if max(m.data.shape) > npix:
         m = m.resample([npix, npix] * u.pix)
     if np.abs(m.rotation_matrix - np.eye(2)).max() > 1e-3:  # e.g. HMI (CROTA2=180)
@@ -292,6 +318,8 @@ def _target_map(m, npix):
 
 def _regrid(m, tmap):
     """Reproject map `m` onto the pixel grid / WCS of `tmap` (NaN outside m's FOV)."""
+    m = _helper._lasco_obstime(m)
+    tmap = _helper._lasco_obstime(tmap)
     ratio = abs(float((tmap.scale.axis1 / m.scale.axis1).to_value(u.one)))
     f = 1
     while f * 2 <= ratio and m.data.shape[0] % (f * 2) == 0 and m.data.shape[1] % (f * 2) == 0:
@@ -321,7 +349,7 @@ def _render_frames(layers, frame_times, outdir, start=0, pfss_lines=None, alpha=
     layers = sorted(layers, key=lambda L: L.z)
     written = []
     previous = None
-    template = sunpy.map.Map(tmap) if isinstance(tmap, (str, Path)) else tmap
+    template = _helper.load_map(tmap) if tmap is not None else None
     for k in range(start, len(frame_times)):
         t = frame_times[k]
         idx = [L.index_for(t) for L in layers]
@@ -331,10 +359,16 @@ def _render_frames(layers, frame_times, outdir, start=0, pfss_lines=None, alpha=
         t = layers[0].times[idx[0]]
         idx = [L.index_for(t) for L in layers]
         intensity = [first_frame_intensity and not written and L.diff and L.dtype == 'running' for L in layers]
-        maps = [L.processed(i, intensity=raw) for L, i, raw in zip(layers, idx, intensity)]
+        try:
+            maps = [L.processed(i, intensity=raw) for L, i, raw in zip(layers, idx, intensity)]
+        except (ValueError, FileNotFoundError) as exc:
+            warnings.warn(f'Frame {t.isot} skipped: {exc}')
+            with (outdir / 'skipped_frames.txt').open('a') as stream:
+                stream.write(f'{t.isot}: {exc}\n')
+            continue
         tmap = _target_map(template if template is not None else maps[0], npix)
         datas = [_regrid(m, tmap) for m in maps] if template is not None else [tmap.data] + [_regrid(m, tmap) for m in maps[1:]]
-        parts = [L.render(d, intensity=raw) for L, d, raw in zip(layers, datas, intensity)]
+        parts = [L.render(d, intensity=raw, source=m) for L, d, raw, m in zip(layers, datas, intensity, maps)]
         img = _composite(parts, alpha)
 
         fig = Figure(figsize=(figsize, figsize), dpi=dpi)
@@ -365,6 +399,43 @@ def _render_frames(layers, frame_times, outdir, start=0, pfss_lines=None, alpha=
         fig.clear()
         written.append(str(out))
     return written
+
+
+def _route_family(files, sT, eT, dT, prefer_helioviewer=True):
+	"""Keep one LASCO product family from a file list, by the route.
+
+	Families: Level-1 (MSB), Helioviewer, Level-0.5. Route Level-1 ->
+	Helioviewer -> Level-0.5 (Level-0.5 before Helioviewer when
+	prefer_helioviewer=False). The first family covering every cadence slot
+	(within dT/2) wins; otherwise the one covering most slots, ties by route.
+	Mixing families would make differences impossible.
+	"""
+	from astropy.io import fits as _fits
+	families = {}
+	for path in files:
+		try:
+			h = _fits.getheader(path)
+		except (OSError, ValueError):
+			continue
+		hv = bool(h.get('OV_HV')) or 'helioviewer' in str(h.get('OV_SRC', '')).lower()
+		unit = str(h.get('BUNIT', '')).replace(' ', '').lower()
+		fam = 1 if hv else 0 if unit in ('msb', 'bsun', 'b_sun', 'meansolarbrightness') else 2
+		if not prefer_helioviewer and fam:
+			fam = 3 - fam
+		families.setdefault(fam, []).append(path)
+	if len(families) <= 1:
+		return list(files)
+	targets = _target_times(sT, eT, dT)
+	def coverage(paths):
+		times = [_helper._hdr_time(p) for p in paths]
+		return sum(any(abs((t - x).to_value(u.s)) <= dT / 2 for t in times) for x in targets)
+	scores = {fam: coverage(paths) for fam, paths in families.items()}
+	complete = [fam for fam, n in scores.items() if n == len(targets)]
+	best = min(complete) if complete else max(scores, key=lambda fam: (scores[fam], -fam))
+	names = {0: 'Level-1', 1: 'Helioviewer' if prefer_helioviewer else 'Level-0.5', 2: 'Level-0.5' if prefer_helioviewer else 'Helioviewer'}
+	print('[overlay] LASCO families (slots covered): ' + ', '.join(f'{names[f]} {scores[f]}/{len(targets)}' for f in sorted(scores))
+		+ f' -> using {names[best]}')
+	return families[best]
 
 
 def _parse_dataset(ds):
