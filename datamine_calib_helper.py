@@ -1041,6 +1041,25 @@ def _hi_series(sT,eT,dT,spacecraft,instrument,outdir):
 	l05=_stereo_series(sT,eT,step,spacecraft,instrument,None,outdir)
 	return level1 if covered>=len(l05) and level1 else l05
 
+def _hv_jp2_bytes(date,source_id,timeout=(20,120),tries=3):
+	"""Return one Helioviewer JP2 (bytes) for datetime `date` and `source_id`.
+
+	Same request as hvpy.getJP2Image, but with a network timeout (connect,
+	read) in seconds and `tries` attempts: hvpy sets no timeout, so a
+	stalled connection would otherwise hang the run forever.
+	"""
+	import requests
+	from hvpy.parameters import getJP2ImageInputParameters
+	p=getJP2ImageInputParameters(date=date,sourceId=source_id)
+	for k in range(tries):
+		try:
+			r=requests.get(p.url,params=p.model_dump(),timeout=timeout);r.raise_for_status()
+			return r.content
+		except (requests.ConnectionError,requests.Timeout) as exc:
+			if k==tries-1:raise
+			warnings.warn(f'Helioviewer request stalled ({exc}); retry {k+1}/{tries-1}.')
+			time.sleep(10*(k+1))
+
 def _fill_helioviewer_jp2(sT,eT,dT,maps,folder,instrument,wave=None,
                          spacecraft='A'):
 	"""Save Helioviewer JP2s; return the saved JP2 paths in the window.
@@ -1117,7 +1136,7 @@ def _fill_helioviewer_jp2(sT,eT,dT,maps,folder,instrument,wave=None,
 			# Helioviewer returns the image nearest the request; if that falls
 			# outside the window, retry once nudged half a tolerance inward.
 			try:
-				staged.write_bytes(hvpy.getJP2Image(request.datetime,source_id))
+				staged.write_bytes(_hv_jp2_bytes(request.datetime,source_id))
 				obs=sunpy.map.Map(staged).date
 				if not start<=obs<=end or abs((obs-target).to_value(u.s))>tolerance:
 					step=-1 if obs>target else 1
