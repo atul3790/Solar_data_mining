@@ -480,7 +480,7 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
                       ar_half_lon=12., ar_half_lat=12., AR_seed_spacing_deg=1., trace_longARrooted_loops=True,
                       AR_r_seed=1.01, n_closed=30, n_AR_open=5, n_global_closed=20,
                       AR_closedB_col='lime', AR_openB_col='magenta', closed_field_color='white',
-                      npix=1024, dpi=120):
+                      npix=1024, dpi=120, maps='both'):
     """Save a full-Sun and an AR PFSS map for time sT (UTC) in basedir; return their paths.
 
     mission: 'SDO' (also 'LASCO'; Earth view), 'STEREO-A' or 'STEREO-B' (that spacecraft's view).
@@ -488,6 +488,10 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
     (171/195/284/304) background image nearest sT, downloaded into img_folder if
     missing (SDO: the SDO root, e.g. 'SDO'; STEREO: the STEREO root, e.g. 'STEREO').
     instrument=None draws the PFSS lines on a blank disk with a Stonyhurst grid.
+    An invalid instrument/wave pair raises ValueError; a missing image falls back
+    to the blank disk with a warning. On a blank full-Sun disk the AR rectangle
+    (+-ar_half_lon x +-ar_half_lat, rotated to sT) is outlined when NOAA_number is set.
+    maps: 'both' (default), 'full' (full-Sun map only) or 'AR' (AR map only; needs NOAA_number).
     PFSS: the UTC-anchored snapshot nearest sT in pfss_dir (PFSS_dT hours apart),
     built with build_pfss if missing; global lines drawn as in the frame makers.
     AR map (only with NOAA_number): AR-rooted lines from the shared cache
@@ -508,6 +512,16 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
     stereo = mission.startswith('STEREO')
     if stereo and mission not in ('STEREO-A', 'STEREO-B'):
         raise ValueError("mission must be 'SDO', 'LASCO', 'STEREO-A' or 'STEREO-B'")
+    valid = {'AIA': ('94', '131', '171', '193', '211', '304', '335', '1600', '1700', '4500'),
+             'HMI': ('magnetogram', 'continuum'), 'EUVI': ('171', '195', '284', '304'), None: (None,)}
+    if inst not in valid or (inst and str(wave).lower() not in valid[inst]) or (inst == 'EUVI') != (stereo and inst is not None):
+        raise ValueError(f'Invalid instrument/wave for mission {mission}: {instrument}/{wave}. AIA: {valid["AIA"]}; '
+                         f'HMI: {valid["HMI"]} (mission SDO/LASCO); EUVI: {valid["EUVI"]} (mission STEREO-A/B); or instrument=None.')
+    maps = str(maps).lower()
+    if maps not in ('both', 'full', 'ar'):
+        raise ValueError("maps must be 'both', 'full' or 'AR'")
+    if maps == 'ar' and not NOAA_number:
+        raise ValueError("maps='AR' needs NOAA_number")
     stamp = t.strftime('%Y%m%d_%H%M%S')
 
     # PFSS snapshot nearest sT (same folder naming and settings check as the frame makers)
@@ -529,9 +543,9 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
         src = root / (img_folder or ('STEREO' if inst == 'EUVI' else 'SDO'))
         try:
             import Multiwb_datamine as dm
-            maps = (dm.get_STEREO_imgs(lo, hi, 600, mission[-1], ['EUVI'], [[int(wave)]], outdir=str(src), nproc=1)[0]
+            found = (dm.get_STEREO_imgs(lo, hi, 600, mission[-1], ['EUVI'], [[int(wave)]], outdir=str(src), nproc=1)[0]
                     if inst == 'EUVI' else dm.get_SDO_imgs(lo, hi, 600, [inst], [[wave]], outdir=str(src), nproc=1)[0])
-            img = min(maps, key=lambda m: abs((m.date - t).to_value(u.s))) if maps else None
+            img = min(found, key=lambda m: abs((m.date - t).to_value(u.s))) if found else None
         except Exception as exc:
             warnings.warn(f'No {inst} {wave} image near {t.isot}: {exc}; blank disk used.')
     observer = img.observer_coordinate if img is not None else (
@@ -545,7 +559,7 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
         hdr = sunpy.map.make_fitswcs_header((npix, npix), ref, scale=[2 * half / npix] * 2 * u.arcsec / u.pix)
         return sunpy.map.Map(np.zeros((npix, npix)), hdr)
 
-    def draw(cmap_, lines, colors, nloop, title, path):
+    def draw(cmap_, lines, colors, nloop, title, path, rect=False):
         fig = plt.figure(figsize=(8, 8))
         ax = fig.add_subplot(projection=cmap_)
         ax.set_facecolor('black')
@@ -562,6 +576,17 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
         cmap_.draw_limb(axes=ax, color='w', lw=.8)
         cmap_.draw_grid(axes=ax, color='w', lw=.4, alpha=.5)
         oh._draw_pfss(ax, cmap_, lines, N_Bloop=nloop, colors=colors)
+        if rect:  # AR rectangle on the visible disk (Stonyhurst edges at the NOAA epoch, rotated to sT)
+            e = np.linspace(-1, 1, 60)
+            L = lon + np.r_[e * ar_half_lon, np.full(60, ar_half_lon), -e * ar_half_lon, np.full(60, -ar_half_lon)]
+            B = lat + np.r_[np.full(60, -ar_half_lat), e * ar_half_lat, np.full(60, ar_half_lat), -e * ar_half_lat]
+            c = SkyCoord(L * u.deg, B * u.deg, frame=frames.HeliographicStonyhurst, obstime=Time(ar_time))
+            with propagate_with_solar_surface():
+                z = c.transform_to(frames.Heliocentric(observer=observer, obstime=t)).z.value
+                x, y = cmap_.wcs.world_to_pixel(c.transform_to(cmap_.coordinate_frame))
+            x[z < 0] = np.nan
+            ax.plot(x, y, color='yellow', lw=1.2)
+            ax.text(np.nanmax(x), np.nanmax(y), f' NOAA {NOAA_number}', color='yellow', fontsize=9)
         ax.set_xlim(0, npix - 1); ax.set_ylim(0, npix - 1)
         ax.coords[0].set_axislabel('Solar X (arcsec)'); ax.coords[1].set_axislabel('Solar Y (arcsec)')
         ax.set_title(title, fontsize=10)
@@ -570,10 +595,6 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
         return str(path)
 
     when = t.strftime('%Y-%m-%d %H:%M UT')
-    out = [draw(canvas((0, 0), 2.6 * rsun), global_lines, {1: '#ff4d4d', -1: '#4da6ff', 0: closed_field_color},
-                n_global_closed, f'PFSS {epoch.strftime("%Y-%m-%d %H:%M")} on {label} {when}',
-                root / f'PFSS_fullSun_{label}_{stamp}.png')]
-
     if NOAA_number:
         try:
             from noaa_region import find_NOAA_location
@@ -581,6 +602,12 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
         except ImportError as exc:
             raise ImportError('The AR map needs Moving_structure_frames (noaa_region, pfss_projection) on the Python path.') from exc
         lon, lat, ar_time, _ = find_NOAA_location(NOAA_number, t.isot, str(root / SRS_folder), local_file=str(root / SRS_folder))
+    out = []
+    if maps in ('both', 'full'):
+        out.append(draw(canvas((0, 0), 2.6 * rsun), global_lines, {1: '#ff4d4d', -1: '#4da6ff', 0: closed_field_color},
+                        n_global_closed, f'PFSS {epoch.strftime("%Y-%m-%d %H:%M")} on {label} {when}',
+                        root / f'PFSS_fullSun_{label}_{stamp}.png', rect=bool(NOAA_number) and img is None))
+    if NOAA_number and maps in ('both', 'ar'):
         sel = ar_rooted_lines(folder, lon, lat, ar_time, ar_half_lon, ar_half_lat, AR_seed_spacing_deg, AR_r_seed,
                               NOAA_number, bool(trace_longARrooted_loops), n_closed, n_AR_open)
         c = SkyCoord(lon * u.deg, lat * u.deg, frame=frames.HeliographicStonyhurst, obstime=Time(ar_time))
