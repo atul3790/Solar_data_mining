@@ -479,7 +479,7 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
                       pfss_dir='PFSS', PFSS_dT=6., gong_cache='solar_data/gong', rss=2.5, nrho=35,
                       r_seed=1.05, n_lon=36, n_lat=18, NOAA_number=None, SRS_folder='NOAA_SRS',
                       ar_half_lon=12., ar_half_lat=12., AR_seed_spacing_deg=1., trace_longARrooted_loops=True,
-                      AR_r_seed=1.01, n_closed=30, n_AR_open=5, n_global_closed=20,
+                      AR_r_seed=1.01, n_closed=30, n_AR_open=5, n_global_closed=20, AR_loop_reach_deg=50.,
                       AR_closedB_col='lime', AR_openB_col='magenta', closed_field_color='white',
                       npix=1024, dpi=120, maps='both', max_image_dt=3600.):
     """Save a full-Sun and an AR PFSS map for time sT (UTC) in basedir; return their paths.
@@ -498,7 +498,8 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
     PFSS: the UTC-anchored snapshot nearest sT in pfss_dir (PFSS_dT hours apart),
     built with build_pfss if missing; global lines drawn as in the frame makers.
     With NOAA_number the full-Sun map also shows the AR lines (closed AR_closedB_col,
-    open AR_openB_col) over the global ones. AR map: AR-rooted lines from the shared cache
+    open AR_openB_col) over the global ones. AR_loop_reach_deg: closed AR loops need both
+    ends within this distance (deg) of the AR centre (default 50; None: no limit). AR map: AR-rooted lines from the shared cache
     (pfss_projection.ar_rooted_lines; needs Moving_structure_frames on the
     Python path), framed on the NOAA SRS position rotated to sT.
     Relative paths are inside basedir. Saves PFSS_fullSun_<label>_<time>.png
@@ -622,7 +623,8 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
             raise ImportError('The AR map needs Moving_structure_frames (noaa_region, pfss_projection) on the Python path.') from exc
         lon, lat, ar_time, _ = find_NOAA_location(NOAA_number, t.isot, str(root / SRS_folder), local_file=str(root / SRS_folder))
         sel = ar_rooted_lines(folder, lon, lat, ar_time, ar_half_lon, ar_half_lat, AR_seed_spacing_deg, AR_r_seed,
-                              NOAA_number, bool(trace_longARrooted_loops), n_closed, n_AR_open)
+                              NOAA_number, bool(trace_longARrooted_loops), n_closed, n_AR_open,
+                              reach_deg=AR_loop_reach_deg)
     ar_colors = {0: AR_closedB_col, 1: AR_openB_col, -1: AR_openB_col}
     out = []
     if maps in ('both', 'full'):
