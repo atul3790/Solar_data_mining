@@ -478,12 +478,12 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
                       pfss_dir='PFSS', PFSS_dT=6., gong_cache='solar_data/gong', rss=2.5, nrho=35,
                       r_seed=1.05, n_lon=36, n_lat=18, NOAA_number=None, SRS_folder='NOAA_SRS',
                       ar_half_lon=12., ar_half_lat=12., AR_seed_spacing_deg=1., trace_longARrooted_loops=True,
-                      AR_r_seed=1.01, n_closed=30, n_AR_open=5, n_global_closed=20, spacecraft='A',
+                      AR_r_seed=1.01, n_closed=30, n_AR_open=5, n_global_closed=20,
                       AR_closedB_col='lime', AR_openB_col='magenta', closed_field_color='white',
                       npix=1024, dpi=120):
     """Save a full-Sun and an AR PFSS map for time sT (UTC) in basedir; return their paths.
 
-    mission: 'SDO' (also 'LASCO'; Earth view) or 'STEREO' (STEREO-<spacecraft> view).
+    mission: 'SDO' (also 'LASCO'; Earth view), 'STEREO-A' or 'STEREO-B' (that spacecraft's view).
     instrument/wave: 'AIA' (e.g. 193), 'HMI' ('magnetogram'/'continuum') or 'EUVI'
     (171/195/284/304) background image nearest sT, downloaded into img_folder if
     missing (SDO: the SDO root, e.g. 'SDO'; STEREO: the STEREO root, e.g. 'STEREO').
@@ -505,6 +505,9 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
     root = Path(basedir).expanduser().resolve()
     t = Time(sT)
     mission, inst = str(mission).upper(), (str(instrument).upper() if instrument else None)
+    stereo = mission.startswith('STEREO')
+    if stereo and mission not in ('STEREO-A', 'STEREO-B'):
+        raise ValueError("mission must be 'SDO', 'LASCO', 'STEREO-A' or 'STEREO-B'")
     stamp = t.strftime('%Y%m%d_%H%M%S')
 
     # PFSS snapshot nearest sT (same folder naming and settings check as the frame makers)
@@ -526,15 +529,15 @@ def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir=
         src = root / (img_folder or ('STEREO' if inst == 'EUVI' else 'SDO'))
         try:
             import Multiwb_datamine as dm
-            maps = (dm.get_STEREO_imgs(lo, hi, 600, spacecraft, ['EUVI'], [[int(wave)]], outdir=str(src), nproc=1)[0]
+            maps = (dm.get_STEREO_imgs(lo, hi, 600, mission[-1], ['EUVI'], [[int(wave)]], outdir=str(src), nproc=1)[0]
                     if inst == 'EUVI' else dm.get_SDO_imgs(lo, hi, 600, [inst], [[wave]], outdir=str(src), nproc=1)[0])
             img = min(maps, key=lambda m: abs((m.date - t).to_value(u.s))) if maps else None
         except Exception as exc:
             warnings.warn(f'No {inst} {wave} image near {t.isot}: {exc}; blank disk used.')
     observer = img.observer_coordinate if img is not None else (
-        get_horizons_coord(f'STEREO-{spacecraft}', t) if mission == 'STEREO' else get_earth(t))
+        get_horizons_coord(mission, t) if stereo else get_earth(t))
     rsun = np.degrees(np.arctan((R_sun / observer.radius).decompose().value)) * 3600  # arcsec
-    label = ((f'STEREO-{spacecraft}_' if inst == 'EUVI' else '') + f'{inst}{wave}' if img is not None else ('STEREO-' + spacecraft if mission == 'STEREO' else 'Earth') + '-view')
+    label = ((mission + '_' if stereo else '') + f'{inst}{wave}' if img is not None else (mission if stereo else 'Earth') + '-view')
 
     def canvas(centre, half):
         """Blank helioprojective map from the observer, centred on centre, +-half arcsec."""
