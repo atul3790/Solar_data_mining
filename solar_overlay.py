@@ -2,7 +2,7 @@
 solar_overlay.py -- image overlays, difference frames and PFSS.
 
 Read finished FITS Maps saved by Multiwb_datamine functions in user-selected
-subfolders. Public API: build_pfss and overlay. Acquisition and instrument
+subfolders. Public API: build_pfss, overlay and pfss_context_maps. Acquisition and instrument
 calibration belong to Multiwb_datamine: get_LASCO_imgs, calib_LASCO,
 get_SDO_imgs, get_EIT_imgs. No download is started by overlay unless explicitly
 requested with download=True. Importing either module starts no workflow.
@@ -19,6 +19,13 @@ build_pfss(sT, eT, outdir, rss=2.5, nrho=35, r_seed=1.05,
     rss: source surface [solar radii]; nrho: radial cells; r_seed: seed radius
     [solar radii], 1 < r_seed < rss; n_lon/n_lat: seed-grid counts. gong_file:
     optional local GONG synoptic FITS; cache_dir: downloaded boundary cache.
+
+pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir='./',
+                  NOAA_number=None, ...)
+    Saves a full-Sun and an AR PFSS map at time sT in basedir (PFSS_fullSun_*.png,
+    PFSS_AR<NOAA>_*.png), on an AIA/HMI/EUVI image nearest sT or, with
+    instrument=None, on a blank disk with a Stonyhurst grid. The AR map needs
+    Moving_structure_frames (noaa_region, pfss_projection) on the Python path.
 
  overlay(datasets, sT, eT, dT, diffs=None, diff_types=None, outdir='./',
          alpha=0.6, cache_dir='./solar_data', npix=1024, dpi=150, figsize=7.0,
@@ -465,3 +472,121 @@ def overlay(datasets, sT, eT, dT, diffs=None, diff_types=None, outdir="./",
     return out
 
 
+
+
+def pfss_context_maps(sT, mission='SDO', instrument=None, wave=None, *, basedir='./', img_folder=None,
+                      pfss_dir='PFSS', PFSS_dT=6., gong_cache='solar_data/gong', rss=2.5, nrho=35,
+                      r_seed=1.05, n_lon=36, n_lat=18, NOAA_number=None, SRS_folder='NOAA_SRS',
+                      ar_half_lon=12., ar_half_lat=12., AR_seed_spacing_deg=1., trace_longARrooted_loops=True,
+                      AR_r_seed=1.01, n_closed=30, n_AR_open=5, n_global_closed=20, spacecraft='A',
+                      AR_closedB_col='lime', AR_openB_col='magenta', closed_field_color='white',
+                      npix=1024, dpi=120):
+    """Save a full-Sun and an AR PFSS map for time sT (UTC) in basedir; return their paths.
+
+    mission: 'SDO' (also 'LASCO'; Earth view) or 'STEREO' (STEREO-<spacecraft> view).
+    instrument/wave: 'AIA' (e.g. 193), 'HMI' ('magnetogram'/'continuum') or 'EUVI'
+    (171/195/284/304) background image nearest sT, downloaded into img_folder if
+    missing (SDO: the SDO root, e.g. 'SDO'; STEREO: the STEREO root, e.g. 'STEREO').
+    instrument=None draws the PFSS lines on a blank disk with a Stonyhurst grid.
+    PFSS: the UTC-anchored snapshot nearest sT in pfss_dir (PFSS_dT hours apart),
+    built with build_pfss if missing; global lines drawn as in the frame makers.
+    AR map (only with NOAA_number): AR-rooted lines from the shared cache
+    (pfss_projection.ar_rooted_lines; needs Moving_structure_frames on the
+    Python path), framed on the NOAA SRS position rotated to sT.
+    Relative paths are inside basedir. Saves PFSS_fullSun_<label>_<time>.png
+    and PFSS_AR<NOAA>_<label>_<time>.png in basedir.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
+    from sunpy.coordinates import frames, get_earth, get_horizons_coord, propagate_with_solar_surface
+    import solar_overlay_helper as oh
+    import datamine_calib_helper as dh
+
+    root = Path(basedir).expanduser().resolve()
+    t = Time(sT)
+    mission, inst = str(mission).upper(), (str(instrument).upper() if instrument else None)
+    stamp = t.strftime('%Y%m%d_%H%M%S')
+
+    # PFSS snapshot nearest sT (same folder naming and settings check as the frame makers)
+    kw = dict(rss=rss, nrho=nrho, r_seed=r_seed, n_lon=n_lon, n_lat=n_lat)
+    step = float(PFSS_dT) * 3600
+    epoch = Time(np.round(t.unix / step) * step, format='unix')
+    folder = root / pfss_dir / epoch.strftime('%Y%m%d_%H%M%S')
+    meta = folder / 'metadata.json'
+    ok = meta.is_file() and all(json.loads(meta.read_text()).get(k) == v for k, v in kw.items())
+    if not ok:
+        print('Generating PFSS snapshot:', epoch.isot)
+        build_pfss(epoch.isot, epoch.isot, folder, cache_dir=str(root / gong_cache), **kw)
+    global_lines = oh._load_pfss(folder)
+
+    # Background image nearest sT (+-10 min)
+    img = None
+    if inst:
+        lo, hi = (t - 600 * u.s).isot, (t + 600 * u.s).isot
+        src = root / (img_folder or ('STEREO' if inst == 'EUVI' else 'SDO'))
+        try:
+            import Multiwb_datamine as dm
+            maps = (dm.get_STEREO_imgs(lo, hi, 600, spacecraft, ['EUVI'], [[int(wave)]], outdir=str(src), nproc=1)[0]
+                    if inst == 'EUVI' else dm.get_SDO_imgs(lo, hi, 600, [inst], [[wave]], outdir=str(src), nproc=1)[0])
+            img = min(maps, key=lambda m: abs((m.date - t).to_value(u.s))) if maps else None
+        except Exception as exc:
+            warnings.warn(f'No {inst} {wave} image near {t.isot}: {exc}; blank disk used.')
+    observer = img.observer_coordinate if img is not None else (
+        get_horizons_coord(f'STEREO-{spacecraft}', t) if mission == 'STEREO' else get_earth(t))
+    rsun = np.degrees(np.arctan((R_sun / observer.radius).decompose().value)) * 3600  # arcsec
+    label = ((f'STEREO-{spacecraft}_' if inst == 'EUVI' else '') + f'{inst}{wave}' if img is not None else ('STEREO-' + spacecraft if mission == 'STEREO' else 'Earth') + '-view')
+
+    def canvas(centre, half):
+        """Blank helioprojective map from the observer, centred on centre, +-half arcsec."""
+        ref = SkyCoord(centre[0] * u.arcsec, centre[1] * u.arcsec, obstime=t, observer=observer, frame=frames.Helioprojective)
+        hdr = sunpy.map.make_fitswcs_header((npix, npix), ref, scale=[2 * half / npix] * 2 * u.arcsec / u.pix)
+        return sunpy.map.Map(np.zeros((npix, npix)), hdr)
+
+    def draw(cmap_, lines, colors, nloop, title, path):
+        fig = plt.figure(figsize=(8, 8))
+        ax = fig.add_subplot(projection=cmap_)
+        ax.set_facecolor('black')
+        if img is not None:
+            b = oh._regrid(img, cmap_)
+            if inst == 'HMI':
+                cm, norm = 'gray', (Normalize(-500, 500, clip=True) if str(wave).lower() == 'magnetogram'
+                                    else Normalize(*np.nanpercentile(b, [1, 99.5]), clip=True))
+            else:
+                cm, norm = dh._image_display_settings(img, inst, wave)
+            ax.imshow(b, cmap=cm, norm=norm, origin='lower')
+        else:
+            ax.imshow(np.full((npix, npix), np.nan), origin='lower')
+        cmap_.draw_limb(axes=ax, color='w', lw=.8)
+        cmap_.draw_grid(axes=ax, color='w', lw=.4, alpha=.5)
+        oh._draw_pfss(ax, cmap_, lines, N_Bloop=nloop, colors=colors)
+        ax.set_xlim(0, npix - 1); ax.set_ylim(0, npix - 1)
+        ax.coords[0].set_axislabel('Solar X (arcsec)'); ax.coords[1].set_axislabel('Solar Y (arcsec)')
+        ax.set_title(title, fontsize=10)
+        fig.savefig(path, dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+        return str(path)
+
+    when = t.strftime('%Y-%m-%d %H:%M UT')
+    out = [draw(canvas((0, 0), 2.6 * rsun), global_lines, {1: '#ff4d4d', -1: '#4da6ff', 0: closed_field_color},
+                n_global_closed, f'PFSS {epoch.strftime("%Y-%m-%d %H:%M")} on {label} {when}',
+                root / f'PFSS_fullSun_{label}_{stamp}.png')]
+
+    if NOAA_number:
+        try:
+            from noaa_region import find_NOAA_location
+            from pfss_projection import ar_rooted_lines
+        except ImportError as exc:
+            raise ImportError('The AR map needs Moving_structure_frames (noaa_region, pfss_projection) on the Python path.') from exc
+        lon, lat, ar_time, _ = find_NOAA_location(NOAA_number, t.isot, str(root / SRS_folder), local_file=str(root / SRS_folder))
+        sel = ar_rooted_lines(folder, lon, lat, ar_time, ar_half_lon, ar_half_lat, AR_seed_spacing_deg, AR_r_seed,
+                              NOAA_number, bool(trace_longARrooted_loops), n_closed, n_AR_open)
+        c = SkyCoord(lon * u.deg, lat * u.deg, frame=frames.HeliographicStonyhurst, obstime=Time(ar_time))
+        with propagate_with_solar_surface():
+            c = c.transform_to(frames.Helioprojective(observer=observer, obstime=t))
+        half = 2 * rsun * np.sin(np.radians(max(ar_half_lon, ar_half_lat))) + .15 * rsun
+        out.append(draw(canvas((c.Tx.to_value(u.arcsec), c.Ty.to_value(u.arcsec)), half), sel,
+                        {0: AR_closedB_col, 1: AR_openB_col, -1: AR_openB_col}, np.nan,
+                        f'NOAA {NOAA_number} PFSS {epoch.strftime("%Y-%m-%d %H:%M")} on {label} {when}',
+                        root / f'PFSS_AR{NOAA_number}_{label}_{stamp}.png'))
+    print('Saved PFSS context maps:', *out, sep='\n  ')
+    return out

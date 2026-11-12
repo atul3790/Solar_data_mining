@@ -164,7 +164,7 @@ result=dm.get_DHband_calibDS('2014-11-03T06:00:00','2014-11-03T06:16:00',
 
 ## solar_overlay.py
 
-This is the image-combination workhorse. Its public functions are `overlay` and `build_pfss`; rendering and projection details live in `solar_overlay_helper.py`. All image layers, difference references and the target map are loaded through `load_map`.
+This is the image-combination workhorse. Its public functions are `overlay`, `build_pfss` and `pfss_context_maps`; rendering and projection details live in `solar_overlay_helper.py`. All image layers, difference references and the target map are loaded through `load_map`.
 
 ### Overlay frames
 
@@ -214,6 +214,8 @@ frames=overlay(['LASCO/C2','pfss'],
 `build_pfss(sT,eT,outdir,rss=2.5,nrho=35,r_seed=1.05,n_lon=36,n_lat=18,gong_file=None,cache_dir='./solar_data/gong')` uses the GONG synoptic radial boundary nearest the interval midpoint, or a supplied local `gong_file`. It builds one static PFSS solution, not an evolving MHD model. `rss` and `r_seed` are in solar radii, with `1 < r_seed < rss`; `nrho` controls radial resolution and `n_lon/n_lat` control seed counts.
 
 It returns model/trace information including `outdir` and saves `boundary.fits`, `metadata.json`, `field_lines.npz` and `model_3d.npz`. The 3-D archive contains Bphi/Btheta/Br in gauss with longitude, sine-latitude and radial axes. Plotting projects the co-rotating geometry to the target epoch, hides segments behind the disk and extends open lines radially to the display FoV. Red/blue indicate outward/inward open fields; white indicates closed loops. Dashed segments beyond the source surface are display continuations, not computed PFSS field. The PFSS drawing functions in `solar_overlay_helper` (`_draw_pfss`, `_pfss_to_fov`, `_nan_sep`, `_closed_loop_limit`) are imported by the frame-maker and flow-tracking projects, so changes here reach them.
+
+`pfss_context_maps(sT,mission='SDO',instrument=None,wave=None,basedir='./',NOAA_number=None,...)` saves two PNGs in `basedir` for time `sT`: the full-Sun PFSS field (`PFSS_fullSun_<label>_<time>.png`) and the AR-rooted field of the NOAA region (`PFSS_AR<NOAA>_<label>_<time>.png`). The background is the AIA, HMI or EUVI image nearest `sT` (downloaded if missing), seen from Earth (`mission='SDO'`) or STEREO (`mission='STEREO'`); `instrument=None` draws a blank disk with a Stonyhurst grid. It reuses the PFSS snapshot folders (`PFSS/<YYYYmmdd_HHMMSS>`) and the AR line cache of the frame makers. The AR map imports `noaa_region` and `pfss_projection` from the Moving_structure_frames project, which must be on the Python path. The frame makers call it at the midpoint of their window when `save_PFSS_maps=True`.
 
 ## Companion code: moving-structure and overlay frames
 
