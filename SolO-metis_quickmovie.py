@@ -25,8 +25,8 @@ rscale   = 2.0                     # diff images multiplied by r**rscale (0 = of
 clip     = 1.0                     # colour-scale percentile clip [%]
 
 # --- output ---
-datadir  = "/Users/atulmohan/Documents/Paper_workshop/Melissa_SGRE20250530/SolO/Metis/metis_tb"            # where FITS files are downloaded
-outdir   = "/Users/atulmohan/Documents/Paper_workshop/Melissa_SGRE20250530/SolO/Metis"          # cube, PNG frames and mp4 go here
+datadir  = "/Metis/metis_tb"            # where FITS files are downloaded
+outdir   = "Metis"          # cube, PNG frames and mp4 go here
 fps      = 5                       # movie frames per second
 dpi      = 150                     # PNG resolution
 # =========================================================================================
