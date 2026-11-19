@@ -1,4 +1,5 @@
 """Internal retrieval/calibration helpers for Multiwb_datamine and solar_overlay.
+Includes the ESA SOAR TAP query/download helpers used by get_Metis_imgs.
 
 Keep this file beside Multiwb_datamine.py and solar_overlay.py. Users should
 call the public functions in those modules; this is an implementation module.
@@ -1318,3 +1319,54 @@ def _lasco_exposure_id(image):
     name = str(image.meta.get('filename', '')).rsplit('/', 1)[-1]
     match = re.fullmatch(r'[23]\d(\d{6})\.(?:fts|fits)', name, re.IGNORECASE)
     return match[1] if match else None
+
+
+SOAR_URL = 'https://soar.esac.esa.int/soar-sl-tap/'
+
+
+def _soar_query(table, instrument, descriptor, level, t_lo, t_hi):
+	"""SOAR TAP rows (dicts) for one product between t_lo and t_hi, time-sorted.
+	table: 'v_sc_data_item' (science) or 'v_ll_data_item' (low latency)."""
+	import csv, io, urllib.parse
+	q = (f"SELECT data_item_id,filename,begin_time,level FROM {table} WHERE instrument='{instrument}' "
+		f"AND descriptor='{descriptor}' AND level='{level}' AND begin_time>='{_parse_time(t_lo).isot}' "
+		f"AND begin_time<='{_parse_time(t_hi).isot}' ORDER BY begin_time")
+	url = SOAR_URL + 'tap/sync?' + urllib.parse.urlencode(dict(REQUEST='doQuery', LANG='ADQL', FORMAT='csv', QUERY=q))
+	with urllib.request.urlopen(url, timeout=120) as s:
+		text = s.read().decode()
+	if text.lstrip().startswith('<'):
+		raise RuntimeError(f'SOAR query failed: {text[:300]}')
+	return list(csv.DictReader(io.StringIO(text)))
+
+
+def _soar_fetch(row, folder, product_type='SCIENCE'):
+	"""Download one SOAR data item (latest version) into folder; reuse an existing copy."""
+	import urllib.parse
+	folder = Path(folder); folder.mkdir(parents=True, exist_ok=True)
+	old = sorted(folder.glob(row['data_item_id'] + '_V*'))
+	if old:
+		return str(old[-1])
+	url = SOAR_URL + 'data?' + urllib.parse.urlencode(dict(retrieval_type='LAST_PRODUCT',
+		data_item_id=row['data_item_id'], product_type=product_type))
+	with urllib.request.urlopen(url, timeout=300) as src:
+		name = re.findall(r'filename="?([^";]+)', src.headers.get('Content-Disposition', '')) or [row['filename']]
+		out = folder / Path(name[0]).name
+		temp = out.with_suffix(out.suffix + '.part')
+		with temp.open('wb') as dst:
+			shutil.copyfileobj(src, dst)
+	temp.replace(out)
+	return str(out)
+
+
+def _bin_pick(rows, edges):
+	"""For each bin [edges[i], edges[i+1]) the first row inside it (None if empty)."""
+	if not rows:
+		return [None] * (len(edges) - 1)
+	t = Time([r['begin_time'] for r in rows]).mjd
+	e = edges.mjd
+	out = []
+	for i in range(len(e) - 1):
+		hi = e[i + 1] + (1e-9 if i == len(e) - 2 else 0)  # last bin includes eT
+		k = np.flatnonzero((t >= e[i]) & (t < hi))
+		out.append(rows[k[0]] if k.size else None)
+	return out

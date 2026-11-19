@@ -141,11 +141,27 @@ jp2_to_fits(jp2_paths,outdir,skip_times=())
 	Convert JP2s to FITS (conventionally into a maps_HV folder): display
 	values, roll 0 (old in OV_ROLL), observer kept, OV_HV/OV_SRC tags.
 
+plot_spacecraft_positions(sT,eT,outdir='./',craft=None,nstep=24,near_earth=0.05)
+	Stonyhurst top view of SOHO, SDO, ACE, Wind, DSCOVR, Aditya-L1, STEREO-A/B,
+	Parker Solar Probe, Solar Orbiter, BepiColombo and Ulysses (JPL Horizons),
+	two panels: heliocentric view with Sun, Earth, tracks and arrows of motion
+	relative to the Sun-Earth line, and a magnified near-Earth (Earth orbit/L1)
+	panel. Output: PNG in outdir; returns
+	(fig, png_path, positions, skipped) and prints the skipped craft.
+
+get_Metis_imgs(sT,eT,dT,instrument='',outdir='./Metis',lowlatency=True)
+	Solar Orbiter Metis FITS from ESA SOAR, one per dT bin. instrument ''/'tb'
+	(VL total brightness), 'pb', 'uv'/'lya', 'vl-image', 'vl-stokes',
+	'vl-pol-angle'. Level-2 (MSB) in outdir/<descriptor>/L2; bins without L2
+	get low-latency LL02 in .../uncalibrated_LL02 (L0/L1 are not public, so no
+	local calibration). Returns {'L2','LL02','missing'} lists.
+
 helioviewer=True in get_SDO_imgs/get_LASCO_imgs/get_STEREO_imgs saves a JP2
 for every cadence bin in raw/helioviewer*/ alongside the science FITS.
 
 Sources: FITS via Fido/VSO (SDAC, SSC data archive, JSOC), the LASCO and
-EIT instrument archives, and Helioviewer JP2. Browse JPG/PNG quicklooks
+EIT instrument archives, Helioviewer JP2, ESA SOAR (Metis) and JPL Horizons
+(spacecraft positions). Browse JPG/PNG quicklooks
 (e.g. stereo-ssc .../browse/) carry no WCS and are never used as images.
 The image functions save FITS Maps to user-chosen outdir subfolders for reuse by
 solar_overlay.overlay(...). AIA from find_coobs and official EIT
@@ -154,7 +170,7 @@ verified downloaded Level-1 products do not. Internal helpers are in the
 companion datamine_calib_helper.py; keep it beside this module.
 This module does not import solar_overlay or run an observing workflow on import.
 """
-__all__ = ['MWAavail', 'get_norp_LC', 'get_norh_imgs', 'find_flare', 'find_RHESSI', 'plot_goes_derivative', 'find_coobs', 'radspec_to_pickle', 'plot_culgoora_spec', 'get_RSTN', 'get_DHband_quicklookDS', 'get_DHband_calibDS', 'get_LASCO_imgs', 'calib_LASCO', 'get_SDO_imgs', 'get_EIT_imgs', 'get_STEREO_imgs', 'get_helioviewer_jp2', 'jp2_to_fits', 'load_map']
+__all__ = ['MWAavail', 'get_norp_LC', 'get_norh_imgs', 'find_flare', 'find_RHESSI', 'plot_goes_derivative', 'find_coobs', 'radspec_to_pickle', 'plot_culgoora_spec', 'get_RSTN', 'get_DHband_quicklookDS', 'get_DHband_calibDS', 'get_LASCO_imgs', 'calib_LASCO', 'get_SDO_imgs', 'get_EIT_imgs', 'get_STEREO_imgs', 'get_helioviewer_jp2', 'jp2_to_fits', 'load_map', 'plot_spacecraft_positions', 'get_Metis_imgs']
 import re,urllib,os,shutil
 import urllib.request
 from urllib.parse import urljoin,urlsplit
@@ -2335,3 +2351,194 @@ def get_STEREO_imgs(sT,eT,dT,spacecraft='A',instruments=['COR2'], waves=None,out
 			_save_image_previews(jp2s,product/'raw'/'helioviewer',instrument,wave)
 
 	return results
+
+######### Spacecraft positions and Solar Orbiter Metis
+
+# name: (JPL Horizons id, operations start, end or None); dates bound the plot
+SPACECRAFT={'SOHO':('SOHO','1995-12-02',None),'SDO':('SDO','2010-02-11',None),
+	'ACE':('-92','1997-08-25',None),'Wind':('Wind','1994-11-01',None),
+	'DSCOVR':('DSCOVR','2015-02-11',None),'Aditya-L1':('Aditya-L1','2023-09-02',None),
+	'STEREO-A':('STEREO-A','2006-10-26',None),'STEREO-B':('STEREO-B','2006-10-26','2014-10-01'),
+	'Parker Solar Probe':('Parker Solar Probe','2018-08-12',None),
+	'Solar Orbiter':('Solar Orbiter','2020-02-10',None),'BepiColombo':('BepiColombo','2018-10-20',None),
+	'Ulysses':('Ulysses','1990-10-06','2009-06-30')}
+SC_COLORS=['#eb6834','#1baf7a','#6250d6','#e87ba4','#008300','#e34948']  # Earth blue #2a78d6, Sun gold #eda100
+
+def plot_spacecraft_positions(sT,eT,outdir='./',craft=None,nstep=24,near_earth=0.05):
+	'''
+	Two-panel map of heliophysics spacecraft, Sun and Earth over sT-eT.
+
+	sT,eT: UTC times. craft: names from SPACECRAFT (None = all).
+	nstep: track samples between sT and eT. near_earth: craft closer than this to
+	Earth (AU), i.e. Earth-orbit and L1 craft, go to the magnified right panel.
+	Frame: Heliographic Stonyhurst from JPL Horizons (get_horizons_coord),
+	projected on the solar equator plane: X towards Earth, Y towards Earth's
+	orbital motion (= +Stonyhurst longitude, west). Latitude is dropped and noted
+	in the label when |lat|>5 deg.
+	Left panel: Sun, Earth, 0.5/1/1.5 AU circles, each craft at mid-time with its
+	Sun-craft line, longitude, track and an arrow along its sT->eT motion relative
+	to the Sun-Earth line (towards/away from a Stonyhurst longitude).
+	Right panel: Earth and the near-Earth craft at mid-time, magnified.
+	Craft outside their operation dates or without ephemeris are skipped and listed.
+	Output: outdir/Spacecraft_positions_<sT>-<eT>.png.
+	Returns (fig, png_path, positions, skipped); positions[name] is the Stonyhurst
+	SkyCoord track, skipped[name] the reason.
+	'''
+	from sunpy.coordinates import get_horizons_coord,get_body_heliographic_stonyhurst
+	from sunpy import log
+	t0,t1=_helper._parse_time(sT),_helper._parse_time(eT)
+	if t1<=t0:raise ValueError('eT must be later than sT.')
+	times=t0+(t1-t0)*np.linspace(0,1,int(nstep)+1)
+	xy=lambda c:(c.radius.to_value(u.AU)*np.cos(c.lat)*np.cos(c.lon),c.radius.to_value(u.AU)*np.cos(c.lat)*np.sin(c.lon))
+	earth=get_body_heliographic_stonyhurst('earth',times)
+	positions,skipped={},{}
+	level=log.level;log.setLevel('WARNING')
+	try:
+		for name in (SPACECRAFT if craft is None else craft):
+			hid,start,end=SPACECRAFT[name]
+			if t1<Time(start) or (end and t0>Time(end)):
+				skipped[name]=f'not operating ({start} to {end or "now"})';continue
+			try:positions[name]=get_horizons_coord(hid,times)
+			except Exception as exc:skipped[name]='no Horizons ephemeris: '+str(exc).strip().split('\n')[0][:80]
+	finally:log.setLevel(level)
+	mid=len(times)//2
+	near=[n for n,c in positions.items() if c.separation_3d(earth).to_value(u.AU).max()<near_earth]
+	far=[n for n in positions if n not in near]
+	print(f'{"Spacecraft":20s} r(AU)  lon(deg) lat(deg) at mid-time {times[mid].isot[:19]}')
+	for n,c in positions.items():
+		print(f'{n:20s} {c[mid].radius.to_value(u.AU):5.3f} {c[mid].lon.to_value(u.deg):8.2f} {c[mid].lat.to_value(u.deg):7.2f}')
+	for n,why in skipped.items():print(f'Skipped {n}: {why}')
+	ex,ey=xy(earth)
+	rmax=max([1.6]+[positions[n].radius.to_value(u.AU).max()*1.15 for n in far])
+	fig,(ax,bx)=plt.subplots(1,2,figsize=(15,8.2),gridspec_kw={'width_ratios':[1.75,1]})
+	# Left: heliocentric view
+	ang=np.linspace(0,2*np.pi,361)
+	used=np.radians([0]+[positions[n][mid].lon.to_value(u.deg) for n in far])
+	cand=np.radians(np.arange(0,360,15))
+	la=cand[np.argmax([np.min(np.abs(np.angle(np.exp(1j*(c-used))))) for c in cand])]  # label angle free of craft
+	for r in np.arange(0.5,rmax,0.5):
+		ax.plot(r*np.cos(ang),r*np.sin(ang),':',color='0.55',lw=0.8,zorder=0)
+		ax.text(r*np.cos(la),r*np.sin(la),f'{r:g} AU',color='0.45',fontsize=9,ha='center',va='center',
+			bbox=dict(fc='white',ec='none',pad=1))
+	ax.plot([0,ex[mid]],[0,ey[mid]],'--',color='#2a78d6',alpha=0.6,lw=1.6,zorder=1)
+	ax.plot(0,0,'o',ms=22,color='#eda100',mec='k',mew=1.2,zorder=4)
+	ax.annotate('Sun',(0,0),xytext=(10,-18),textcoords='offset points',fontsize=12,fontweight='bold')
+	ax.plot(ex[mid],ey[mid],'o',ms=11,color='#2a78d6',mec='white',mew=1.5,zorder=5)
+	labels=[('Earth',ex[mid],ey[mid],0.)]  # (text, x, y, angle deg) for the callout ring
+	L=0.13*rmax
+	for i,n in enumerate(far):
+		col=SC_COLORS[i%len(SC_COLORS)];c=positions[n];x,y=xy(c)
+		r,lon,lat=c[mid].radius.to_value(u.AU),c[mid].lon.to_value(u.deg),c[mid].lat.to_value(u.deg)
+		ax.plot([0,x[mid]],[0,y[mid]],':',color=col,lw=1,alpha=0.8,zorder=1)
+		ax.plot(x,y,color=col,lw=2,alpha=0.5,zorder=2)
+		ax.plot(x[mid],y[mid],'D',ms=10,color=col,mec='white',mew=1.2,zorder=5)
+		d=np.array([x[-1]-x[0],y[-1]-y[0]]);norm=np.hypot(*d)
+		if norm>0:ax.annotate('',xy=(x[mid]+L*d[0]/norm,y[mid]+L*d[1]/norm),xytext=(x[mid],y[mid]),
+			arrowprops=dict(arrowstyle='-|>',color=col,lw=2.2,mutation_scale=18,shrinkA=0,shrinkB=0),zorder=8)
+		u_=np.array([x[mid],y[mid]])/max(np.hypot(x[mid],y[mid]),1e-9)
+		lab=n+f'\n{lon:+.1f}°, {r:.2f} AU'+(f', lat {lat:+.0f}°' if abs(lat)>5 else '')
+		labels.append((lab,x[mid],y[mid],lon))
+	# Callout ring at rmax: label angles follow the craft, spread to >=26 deg apart
+	A=np.array([l[3] for l in labels],float);o=np.argsort(A);a_=A[o].copy()
+	for _ in range(200):
+		g=np.diff(np.r_[a_,a_[0]+360])
+		if len(a_)<2 or g.min()>=26-1e-6:break
+		for k in np.flatnonzero(g<26):
+			j=(k+1)%len(a_);push=(26-g[k])/2;a_[k]-=push;a_[j]+=push
+	A[o]=a_
+	for (lab,x0,y0,_),aa in zip(labels,np.radians(A)):
+		c_,s_=np.cos(aa),np.sin(aa)
+		ax.annotate(lab,(x0,y0),xytext=(rmax*c_,rmax*s_),fontsize=10.5,fontweight='bold',
+			ha='left' if c_>0.3 else 'right' if c_<-0.3 else 'center',va='bottom' if s_>0.3 else 'top' if s_<-0.3 else 'center',
+			arrowprops=dict(arrowstyle='-',color='0.5',lw=0.8,shrinkB=6),zorder=7)
+	ax.set_xlim(-1.6*rmax,1.6*rmax);ax.set_ylim(-1.2*rmax,1.2*rmax);ax.set_aspect('equal');ax.axis('off')
+	ax.set_title('Heliocentric geometry (projected on the solar equator; X towards Earth, Y along its orbital motion)\n'
+		'arrows: motion relative to the Sun–Earth line over the window',fontsize=11)
+	# Right: near-Earth magnified
+	bx.plot(ex[mid],ey[mid],'o',ms=13,color='#2a78d6',zorder=5)
+	bx.axhline(ey[mid],ls='--',color='#2a78d6',lw=0.7,alpha=0.5)
+	bx.annotate('Earth',(ex[mid],ey[mid]),xytext=(0,14),textcoords='offset points',ha='center',fontsize=11,fontweight='bold')
+	if near:
+		P={n:xy(positions[n][mid]) for n in near}
+		xs=[P[n][0] for n in near]+[ex[mid]];ys=[P[n][1] for n in near]+[ey[mid]]
+		span=max(max(xs)-min(xs),max(ys)-min(ys),2e-3)
+		cx,cy=(max(xs)+min(xs))/2,(max(ys)+min(ys))/2
+		l1=sorted([n for n in near if P[n][0]<ex[mid]-0.1*span],key=lambda n:P[n][1])  # L1 craft: label column on the left
+		ly=np.linspace(cy-0.45*span,cy+0.45*span,len(l1)) if len(l1)>1 else [cy]*len(l1)
+		x_l=min(xs)-0.12*span
+		for n in near:
+			col=SC_COLORS[near.index(n)%len(SC_COLORS)]
+			bx.plot(*P[n],'o',ms=8,color=col,mec='white',mew=1,zorder=6)
+			if n in l1:bx.annotate(n,P[n],xytext=(x_l,ly[l1.index(n)]),fontsize=10,ha='right',va='center',
+				arrowprops=dict(arrowstyle='-',color='0.5',lw=0.8,shrinkB=4))
+			else:bx.annotate(n,P[n],xytext=(-14,-20),textcoords='offset points',fontsize=10,ha='right',va='center',
+				arrowprops=dict(arrowstyle='-',color='0.5',lw=0.8,shrinkB=4))
+		bx.set_xlim(min(xs)-0.45*span,max(xs)+0.1*span);bx.set_ylim(cy-0.6*span,cy+0.6*span)
+	else:bx.text(0.5,0.4,'no near-Earth craft',transform=bx.transAxes,ha='center',color='0.4')
+	bx.set_aspect('equal')
+	bx.set_xlabel('X (AU)');bx.set_ylabel('Y (AU)');bx.set_title('Near Earth: Earth orbit and L1 (magnified)',fontsize=11)
+	for s in ('top','right'):bx.spines[s].set_visible(False)
+	fig.suptitle(f'Heliophysics spacecraft positions | {t0.isot[:16].replace("T"," ")} – {t1.isot[:16].replace("T"," ")} UTC'
+		' (markers at mid-time)\nSun–Earth direction = 0° · positive towards Earth orbital motion',fontsize=14,fontweight='bold')
+	import textwrap
+	fig.text(0.01,0.005,textwrap.fill('Source: JPL Horizons via sunpy get_horizons_coord; Heliographic Stonyhurst, latitude dropped.'
+		+(' Skipped: '+'; '.join(f'{n} ({w.split(" (")[0]})' for n,w in skipped.items()) if skipped else ''),200),fontsize=8,color='0.35')
+	folder=Path(outdir).expanduser().resolve();folder.mkdir(parents=True,exist_ok=True)
+	tag=lambda t:t.strftime('%Y%m%dT%H%M%S')
+	path=folder/f'Spacecraft_positions_{tag(t0)}-{tag(t1)}.png'
+	fig.tight_layout(rect=(0,0.04,1,0.91));fig.savefig(path,dpi=150)
+	return fig,str(path),positions,skipped
+
+
+# instrument/filter argument -> SOAR Metis descriptor
+METIS_PRODUCTS={'':'metis-vl-tb','tb':'metis-vl-tb','vl-tb':'metis-vl-tb','pb':'metis-vl-pb','vl-pb':'metis-vl-pb',
+	'uv':'metis-uv-image','lya':'metis-uv-image','uv-image':'metis-uv-image','vl-image':'metis-vl-image',
+	'vl-stokes':'metis-vl-stokes','vl-pol-angle':'metis-vl-pol-angle'}
+
+def get_Metis_imgs(sT,eT,dT,instrument='',outdir='./Metis',lowlatency=True):
+	'''
+	Download Solar Orbiter Metis coronagraph FITS from ESA SOAR, one file per dT bin.
+
+	sT,eT: UTC interval; dT: bin width in seconds; bins are [sT+k*dT, sT+(k+1)*dT),
+	the last one closed at eT, and the first image inside each bin is taken.
+	instrument: '' or 'tb'/'vl-tb' (VL total brightness, default), 'pb'/'vl-pb'
+	(VL polarized brightness), 'uv'/'lya'/'uv-image' (UV H I Lyman-alpha),
+	'vl-image' (single polarizer frames), 'vl-stokes', 'vl-pol-angle'.
+	SOAR (checked Nov 2026) holds public Metis science data only at Level 2
+	(MSB, calibrated); L0/L1 are not public and the Metis calibration pipeline
+	(IDL) is not distributed, so lower-level data cannot be calibrated here.
+	Science L2 is released with a long delay (complete to mid-2025, sparse
+	synoptic files later). For bins without L2 and lowlatency=True, SOAR
+	low-latency LL02 FITS (preliminary MSB, 'not for scientific analysis') are
+	saved separately in outdir/<descriptor>/uncalibrated_LL02/.
+	Output: L2 FITS in outdir/<descriptor>/L2/, PNG previews in .../PNGs/.
+	Returns {'L2': paths, 'LL02': paths, 'missing': bin start times without data}.
+	'''
+	key=str(instrument).strip().lower().replace('metis-','')
+	if key not in METIS_PRODUCTS:raise ValueError('instrument must be one of '+', '.join(repr(k) for k in METIS_PRODUCTS))
+	desc=METIS_PRODUCTS[key]
+	starts=_helper._target_times(sT,eT,dT)
+	t1=_helper._parse_time(eT)
+	edges=Time(list(starts[:-1])+[t1]) if (t1-starts[-1]).to_value(u.s)<1 else Time(list(starts)+[t1])
+	root=Path(outdir).expanduser().resolve()/desc
+	out={'L2':[],'LL02':[],'missing':[]}
+	l2=_helper._bin_pick(_helper._soar_query('v_sc_data_item','METIS',desc,'L2',edges[0],edges[-1]),edges)
+	need=[i for i,r in enumerate(l2) if r is None]
+	ll=[None]*len(l2)
+	if need and lowlatency:
+		ll=_helper._bin_pick(_helper._soar_query('v_ll_data_item','METIS',desc,'LL02',edges[0],edges[-1]),edges)
+	for i in range(len(l2)):
+		try:
+			if l2[i] is not None:out['L2'].append(_helper._soar_fetch(l2[i],root/'L2'))
+			elif ll[i] is not None:out['LL02'].append(_helper._soar_fetch(ll[i],root/'uncalibrated_LL02','LOW_LATENCY'))
+			else:out['missing'].append(edges[i].isot)
+		except OSError as exc:
+			warnings.warn(f'Metis download failed for bin {edges[i].isot}: {exc}');out['missing'].append(edges[i].isot)
+	for lev,sub in (('L2','PNGs'),('LL02','uncalibrated_LL02/PNGs')):
+		if not out[lev]:continue
+		maps=[]
+		for p in out[lev]:
+			with fits.open(p) as h:maps.append(sunpy.map.Map(h[0].data,h[0].header))
+		_save_image_previews(maps,root/sub,'METIS',desc.replace('metis-',''))
+	print(f"Metis {desc}: {len(out['L2'])} L2, {len(out['LL02'])} uncalibrated LL02, {len(out['missing'])} empty bins of {len(l2)}.")
+	return out
