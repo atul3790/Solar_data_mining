@@ -37,12 +37,14 @@ Uses Multiwb_datamine.get_STIX_LC (STIX, from ESA SOAR) and xray_lightcurves
 # fig_format      : 'png' or 'pdf'.
 # out_tag         : plain name tag for the figure; '' = built from sT/eT.
 # =========================================================================================
+import os,sys
+import Multiwb_datamine as mwd
+import xray_lightcurves as xlc
 
 ########### INPUT
 # ---- Event and paths ----
 sT='2025-05-30T07:00:00'	# UTC
 eT='2025-05-31T00:00:00'	# UTC
-module_path='~/Documents/Codes/Modules/Solar_data_mining-main/'
 output_folder='./results/STIX_GOES_20250530/'
 
 # ---- Sampling ----
@@ -64,11 +66,6 @@ out_tag=''
 
 
 def main():
-	import os,sys
-	sys.path.insert(0,os.path.expanduser(module_path))
-	import Multiwb_datamine as mwd
-	import xray_lightcurves as xlc
-
 	goes_res={1:'avg1m',2:'flx1s'}[goes_res_option]
 	goes_ch={1:'xrsb',2:'xrsa'}[goes_channel_option]
 	out=os.path.abspath(os.path.expanduser(output_folder))
