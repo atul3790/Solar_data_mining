@@ -9,6 +9,19 @@ writes PNG frames and stitches them into an MP4.
 How to use: edit the INPUT section below, then run   python metis_quickmovie.py
 Needs: numpy, scipy, astropy, matplotlib, ffmpeg (or `pip install imageio-ffmpeg`)
 """
+import glob, os, shutil, subprocess, sys, warnings
+import urllib.parse, urllib.request
+import numpy as np
+from astropy.io import fits
+from astropy.wcs import WCS, FITSFixedWarning
+from astropy.time import Time
+import astropy.units as u
+from scipy.ndimage import map_coordinates
+
+warnings.simplefilter("ignore", FITSFixedWarning)
+warnings.simplefilter("ignore", RuntimeWarning)
+TAP = "https://soar.esac.esa.int/soar-sl-tap/"
+RSUN_M = 6.957e8
 
 # =========================================================================================
 #                                       INPUT
@@ -30,22 +43,6 @@ outdir   = "Metis"          # cube, PNG frames and mp4 go here
 fps      = 5                       # movie frames per second
 dpi      = 150                     # PNG resolution
 # =========================================================================================
-
-import glob, os, shutil, subprocess, sys, warnings
-import urllib.parse, urllib.request
-import numpy as np
-from astropy.io import fits
-from astropy.wcs import WCS, FITSFixedWarning
-from astropy.time import Time
-import astropy.units as u
-from scipy.ndimage import map_coordinates
-
-warnings.simplefilter("ignore", FITSFixedWarning)
-warnings.simplefilter("ignore", RuntimeWarning)
-TAP = "https://soar.esac.esa.int/soar-sl-tap/"
-RSUN_M = 6.957e8
-
-
 # ================================================================ 1. find + download
 def query_soar(t0, t1, product="metis-vl-tb"):
     q = (f"SELECT data_item_id, filename, begin_time FROM v_sc_data_item "
