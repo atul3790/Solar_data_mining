@@ -149,12 +149,21 @@ plot_spacecraft_positions(sT,eT,outdir='./',craft=None,nstep=24,near_earth=0.05)
 	panel. Output: PNG in outdir; returns
 	(fig, png_path, positions, skipped) and prints the skipped craft.
 
-get_Metis_imgs(sT,eT,dT,instrument='',outdir='./Metis',lowlatency=True)
-	Solar Orbiter Metis FITS from ESA SOAR, one per dT bin. instrument ''/'tb'
-	(VL total brightness), 'pb', 'uv'/'lya', 'vl-image', 'vl-stokes',
-	'vl-pol-angle'. Level-2 (MSB) in outdir/<descriptor>/L2; bins without L2
-	get low-latency LL02 in .../uncalibrated_LL02 (L0/L1 are not public, so no
-	local calibration). Returns {'L2','LL02','missing'} lists.
+get_Metis_imgs(sT,eT,dT,product='tb',outdir='./SolO/Metis',lowlatency=True)
+	Solar Orbiter Metis Maps from ESA SOAR, one per dT bin (like get_LASCO_imgs).
+	product 'tb' (VL total brightness), 'pb', 'uv'/'lya', 'vl-image', 'vl-stokes',
+	'vl-pol-angle'. Route Level 2 (MSB) -> low-latency LL02 (uncalibrated
+	quick-look; L0/L1 are not public, so no local calibration). FITS in
+	outdir/<product>/{raw,raw_LL02,maps}; returns time-sorted Maps.
+
+get_SolO_imgs(sT,eT,dT,instruments=['EUI','Metis'],waves=[[174],['tb']],outdir='./SolO',nproc=2)
+	Solar Orbiter EUI (FSI 174/304, HRI EUV 174, HRI Ly-a) and Metis Maps from
+	SOAR per instrument/product (like get_SDO_imgs); one Map list per combination.
+
+get_STIX_LC(sT,eT,outdir='./SolO/STIX',earth_time=True,plot=True)
+	Solar Orbiter STIX quick-look X-ray light curves (4-10 ... 50-84 keV, counts/s)
+	from SOAR; times shifted to Earth light-arrival by default to compare with GOES.
+	Saves CSV (+PNG); returns (DataFrame, CSV path).
 
 helioviewer=True in get_SDO_imgs/get_LASCO_imgs/get_STEREO_imgs saves a JP2
 for every cadence bin in raw/helioviewer*/ alongside the science FITS.
@@ -170,7 +179,7 @@ verified downloaded Level-1 products do not. Internal helpers are in the
 companion datamine_calib_helper.py; keep it beside this module.
 This module does not import solar_overlay or run an observing workflow on import.
 """
-__all__ = ['MWAavail', 'get_norp_LC', 'get_norh_imgs', 'find_flare', 'find_RHESSI', 'plot_goes_derivative', 'find_coobs', 'radspec_to_pickle', 'plot_culgoora_spec', 'get_RSTN', 'get_DHband_quicklookDS', 'get_DHband_calibDS', 'get_LASCO_imgs', 'calib_LASCO', 'get_SDO_imgs', 'get_EIT_imgs', 'get_STEREO_imgs', 'get_helioviewer_jp2', 'jp2_to_fits', 'load_map', 'plot_spacecraft_positions', 'get_Metis_imgs']
+__all__ = ['MWAavail', 'get_norp_LC', 'get_norh_imgs', 'find_flare', 'find_RHESSI', 'plot_goes_derivative', 'find_coobs', 'radspec_to_pickle', 'plot_culgoora_spec', 'get_RSTN', 'get_DHband_quicklookDS', 'get_DHband_calibDS', 'get_LASCO_imgs', 'calib_LASCO', 'get_SDO_imgs', 'get_EIT_imgs', 'get_STEREO_imgs', 'get_helioviewer_jp2', 'jp2_to_fits', 'load_map', 'plot_spacecraft_positions', 'get_Metis_imgs', 'get_SolO_imgs', 'get_STIX_LC']
 import re,urllib,os,shutil
 import urllib.request
 from urllib.parse import urljoin,urlsplit
@@ -248,7 +257,7 @@ def _save_image_previews(images,outdir,instrument=None,product=None):
 			else:
 				lo,hi=np.percentile(values,[1,99.5])
 			weight=np.clip((data-lo)/max(hi-lo,np.finfo(float).eps),0,1)
-			if kind in ('AIA','EUVI','EIT'):
+			if kind in ('AIA','EUVI','EIT','EUI'):
 				cmap,norm=_helper._image_display_settings(m,kind,band,jp2)
 				weight=norm(np.ma.masked_invalid(data))
 			name=re.sub(r'[^A-Za-z0-9_.-]','_',kind+('_'+band if band else ''))
@@ -2490,55 +2499,139 @@ def plot_spacecraft_positions(sT,eT,outdir='./',craft=None,nstep=24,near_earth=0
 	return fig,str(path),positions,skipped
 
 
-# instrument/filter argument -> SOAR Metis descriptor
+# Solar Orbiter products: instrument/product argument -> SOAR descriptor
 METIS_PRODUCTS={'':'metis-vl-tb','tb':'metis-vl-tb','vl-tb':'metis-vl-tb','pb':'metis-vl-pb','vl-pb':'metis-vl-pb',
 	'uv':'metis-uv-image','lya':'metis-uv-image','uv-image':'metis-uv-image','vl-image':'metis-vl-image',
 	'vl-stokes':'metis-vl-stokes','vl-pol-angle':'metis-vl-pol-angle'}
+EUI_PRODUCTS={174:'eui-fsi174-image','fsi174':'eui-fsi174-image',304:'eui-fsi304-image','fsi304':'eui-fsi304-image',
+	'hri174':'eui-hrieuv174-image','hrieuv174':'eui-hrieuv174-image','hri1216':'eui-hrilya1216-image','hrilya1216':'eui-hrilya1216-image'}
 
-def get_Metis_imgs(sT,eT,dT,instrument='',outdir='./Metis',lowlatency=True):
+def _solo_product(instrument,product):
+	'''(SOAR instrument, descriptor, folder name) for a Solar Orbiter instrument/product.'''
+	instrument=str(instrument).strip().upper()
+	if instrument=='METIS':
+		key=str(product if product is not None else '').strip().lower().replace('metis-','')
+		if key not in METIS_PRODUCTS:raise ValueError('Metis product must be one of '+', '.join(repr(k) for k in METIS_PRODUCTS))
+		desc=METIS_PRODUCTS[key]
+	elif instrument=='EUI':
+		key=174 if product is None else product
+		key=int(key) if str(key).isdigit() else str(key).strip().lower().replace('eui-','')
+		if key not in EUI_PRODUCTS:raise ValueError('EUI product must be one of '+', '.join(repr(k) for k in EUI_PRODUCTS))
+		desc=EUI_PRODUCTS[key]
+	else:raise ValueError("instrument must be 'Metis' or 'EUI'.")
+	return instrument,desc,desc.split('-',1)[1].replace('-image','')
+
+def _solo_series(sT,eT,dT,instrument,product,outdir,lowlatency=True):
+	'''One SOAR instrument/product series: download, keep one image per dT bin, return Maps.
+
+	Layout: outdir/<product>/raw (L2 downloads), raw_LL02 (low-latency downloads),
+	maps (Metis primary-HDU FITS; EUI L2 files are used as downloaded), PNGs.
+	LL02 Maps carry OV_FULL=False and an OV_CAL note.
 	'''
-	Download Solar Orbiter Metis coronagraph FITS from ESA SOAR, one file per dT bin.
+	inst,desc,name=_solo_product(instrument,product)
+	root=Path(outdir).expanduser().resolve()/name
+	got=_helper._soar_series(inst,desc,sT,eT,dT,root/'raw',root/'raw_LL02',lowlatency)
+	maps=[]
+	for level in ('L2','LL02'):
+		for p in got[level]:
+			if inst=='EUI':m=sunpy.map.Map(p)
+			else:  # Metis: primary HDU; zero/negative pixels (occulter, outside the field) -> NaN
+				with fits.open(p) as h:d=h[0].data.astype(float);m=sunpy.map.Map(np.where(d>0,d,np.nan),h[0].header)
+			if level=='LL02':
+				m.meta['ov_full']=False
+				m.meta['ov_cal']='SOAR low-latency LL02: preliminary, not for scientific analysis'
+			maps.append(m)
+	maps.sort(key=lambda m:m.date.mjd)
+	if inst=='METIS' and maps:
+		_helper._save_maps(maps,root/'maps',desc)
+	_save_image_previews(maps,root/'PNGs',inst,name)
+	print(f"{inst}/{name}: {len(got['L2'])} L2, {len(got['LL02'])} LL02 (uncalibrated quick-look), {len(got['missing'])} empty bins.")
+	return maps
+
+def get_Metis_imgs(sT,eT,dT,product='tb',outdir='./SolO/Metis',lowlatency=True):
+	'''
+	Return Solar Orbiter Metis Maps from ESA SOAR, one per dT bin (like get_LASCO_imgs).
 
 	sT,eT: UTC interval; dT: bin width in seconds; bins are [sT+k*dT, sT+(k+1)*dT),
-	the last one closed at eT, and the first image inside each bin is taken.
-	instrument: '' or 'tb'/'vl-tb' (VL total brightness, default), 'pb'/'vl-pb'
-	(VL polarized brightness), 'uv'/'lya'/'uv-image' (UV H I Lyman-alpha),
-	'vl-image' (single polarizer frames), 'vl-stokes', 'vl-pol-angle'.
-	SOAR (checked Nov 2026) holds public Metis science data only at Level 2
-	(MSB, calibrated); L0/L1 are not public and the Metis calibration pipeline
-	(IDL) is not distributed, so lower-level data cannot be calibrated here.
-	Science L2 is released with a long delay (complete to mid-2025, sparse
-	synoptic files later). For bins without L2 and lowlatency=True, SOAR
-	low-latency LL02 FITS (preliminary MSB, 'not for scientific analysis') are
-	saved separately in outdir/<descriptor>/uncalibrated_LL02/.
-	Output: L2 FITS in outdir/<descriptor>/L2/, PNG previews in .../PNGs/.
-	Returns {'L2': paths, 'LL02': paths, 'missing': bin start times without data}.
+	the last closed at eT; the first image inside each bin is kept.
+	product: 'tb' (VL total brightness, default; '' too), 'pb' (VL polarized
+	brightness), 'uv'/'lya' (UV H I Lyman-alpha), 'vl-image', 'vl-stokes', 'vl-pol-angle'.
+	Route: Level 2 (calibrated MSB) -> low-latency LL02 (lowlatency=True).
+	SOAR (checked Nov 2026) has public Metis science data only at Level 2; L0/L1
+	and the IDL calibration pipeline are not public, so lower levels cannot be
+	calibrated locally. L2 is complete to mid-2025, sparse synoptic files later.
+	LL02 FITS are preliminary MSB marked 'not for scientific analysis'; their Maps
+	carry OV_FULL=False and an OV_CAL note.
+	Output: outdir/<product>/raw (L2), raw_LL02, maps (primary-HDU FITS with NaN
+	outside the field, read with load_map; the flow pipeline uses this folder) and
+	PNGs. Returns the time-sorted Maps.
 	'''
-	key=str(instrument).strip().lower().replace('metis-','')
-	if key not in METIS_PRODUCTS:raise ValueError('instrument must be one of '+', '.join(repr(k) for k in METIS_PRODUCTS))
-	desc=METIS_PRODUCTS[key]
-	starts=_helper._target_times(sT,eT,dT)
-	t1=_helper._parse_time(eT)
-	edges=Time(list(starts[:-1])+[t1]) if (t1-starts[-1]).to_value(u.s)<1 else Time(list(starts)+[t1])
-	root=Path(outdir).expanduser().resolve()/desc
-	out={'L2':[],'LL02':[],'missing':[]}
-	l2=_helper._bin_pick(_helper._soar_query('v_sc_data_item','METIS',desc,'L2',edges[0],edges[-1]),edges)
-	need=[i for i,r in enumerate(l2) if r is None]
-	ll=[None]*len(l2)
-	if need and lowlatency:
-		ll=_helper._bin_pick(_helper._soar_query('v_ll_data_item','METIS',desc,'LL02',edges[0],edges[-1]),edges)
-	for i in range(len(l2)):
-		try:
-			if l2[i] is not None:out['L2'].append(_helper._soar_fetch(l2[i],root/'L2'))
-			elif ll[i] is not None:out['LL02'].append(_helper._soar_fetch(ll[i],root/'uncalibrated_LL02','LOW_LATENCY'))
-			else:out['missing'].append(edges[i].isot)
-		except OSError as exc:
-			warnings.warn(f'Metis download failed for bin {edges[i].isot}: {exc}');out['missing'].append(edges[i].isot)
-	for lev,sub in (('L2','PNGs'),('LL02','uncalibrated_LL02/PNGs')):
-		if not out[lev]:continue
-		maps=[]
-		for p in out[lev]:
-			with fits.open(p) as h:maps.append(sunpy.map.Map(h[0].data,h[0].header))
-		_save_image_previews(maps,root/sub,'METIS',desc.replace('metis-',''))
-	print(f"Metis {desc}: {len(out['L2'])} L2, {len(out['LL02'])} uncalibrated LL02, {len(out['missing'])} empty bins of {len(l2)}.")
-	return out
+	return _solo_series(sT,eT,dT,'Metis',product,outdir,lowlatency)
+
+def get_SolO_imgs(sT,eT,dT,instruments=['EUI','Metis'],waves=[[174],['tb']],
+	outdir='./SolO',nproc=2,lowlatency=True):
+	'''
+	Get Solar Orbiter EUI/Metis Maps from ESA SOAR for instrument-product combinations (like get_SDO_imgs).
+
+	instruments: 'EUI' and/or 'Metis'. waves: one list per instrument.
+		EUI: 174/'fsi174', 304/'fsi304' (Full Sun Imager), 'hri174' (HRI EUV),
+		'hri1216' (HRI Lyman-alpha). Metis: products as in get_Metis_imgs.
+	One image per dT bin; Level 2 first, then low-latency LL02 if lowlatency=True.
+	Output: outdir/<EUI|Metis>/<product>/ with raw, raw_LL02, maps (Metis) and PNGs.
+	nproc: download workers over combinations; 1 runs serially.
+	Returns one time-sorted Map list per combination, in input order.
+	'''
+	if len(instruments)!=len(waves):raise ValueError('instruments and waves must have matching lengths.')
+	if int(nproc)!=nproc or nproc<1:raise ValueError('nproc must be a positive integer.')
+	jobs=[]
+	for inst,prods in zip(instruments,waves):
+		for p in ([prods] if np.isscalar(prods) or prods is None else prods):
+			i,_,name=_solo_product(inst,p)
+			job=(sT,eT,dT,i,p,str(Path(outdir)/('Metis' if i=='METIS' else 'EUI')),lowlatency)
+			if job not in jobs:jobs.append(job)
+	if not jobs:return []
+	if min(int(nproc),len(jobs))==1:return [_solo_series(*j) for j in jobs]
+	with Pool(min(int(nproc),len(jobs))) as pool:
+		return pool.starmap(_solo_series,jobs)
+
+
+def get_STIX_LC(sT,eT,outdir='./SolO/STIX',earth_time=True,plot=True):
+	'''
+	Solar Orbiter STIX quick-look X-ray light curves from ESA SOAR (L1 stix-ql-lightcurve).
+
+	sT,eT: UTC interval. Daily files are downloaded to outdir/raw (reused if present).
+	Bands: 4-10, 10-15, 15-25, 25-50, 50-84 keV, as counts/s (4 s bins; quick-look
+	counts are summed over detectors and not background-subtracted). The rcr column is
+	the rate-control regime: attenuator/pixel changes at rcr>0 make steps in the counts.
+	earth_time=True shifts times by the file's EAR_TDEL (light-time difference
+	Solar Orbiter -> Earth), so STIX lines up with GOES; False keeps spacecraft UTC.
+	Output: outdir/STIX_QL_<sT>-<eT>.csv (and .png with plot=True).
+	Returns (DataFrame with datetime, the band columns and rcr; CSV path).
+	'''
+	t0,t1=_helper._parse_time(sT),_helper._parse_time(eT)
+	if t1<=t0:raise ValueError('eT must be later than sT.')
+	root=Path(outdir).expanduser().resolve()
+	rows=_helper._soar_query('v_sc_data_item','STIX','stix-ql-lightcurve','L1',t0-1*u.day,t1)
+	parts=[]
+	for r in rows:
+		with fits.open(_helper._soar_fetch(r,root/'raw')) as h:
+			H=h[0].header;d=h['DATA'].data;e=h['ENERGIES'].data
+			t=Time(H['DATE-BEG'])+(d['time']/100.)*u.s+(float(H.get('EAR_TDEL',0.)) if earth_time else 0.)*u.s
+			df=pd.DataFrame(np.asarray(d['counts'],float)/(np.asarray(d['timedel'],float)/100.)[:,None],
+				columns=[f'{lo:g}-{hi:g} keV' for lo,hi in zip(e['e_low'],e['e_high'])])
+			df.insert(0,'datetime',pd.to_datetime(t.datetime64,utc=True));df['rcr']=d['rcr']
+			parts.append(df)
+	if not parts:raise FileNotFoundError(f'No STIX quick-look light curve on SOAR for {sT} -- {eT}.')
+	df=pd.concat(parts).drop_duplicates('datetime').sort_values('datetime')
+	df=df[(df.datetime>=pd.Timestamp(t0.datetime,tz='UTC'))&(df.datetime<=pd.Timestamp(t1.datetime,tz='UTC'))].reset_index(drop=True)
+	tag=lambda t:t.strftime('%Y%m%dT%H%M%S')
+	csv=root/f'STIX_QL_{tag(t0)}-{tag(t1)}.csv';df.to_csv(csv,index=False)
+	if plot:
+		fig,ax=plt.subplots(figsize=(10,4))
+		for c,col in zip([k for k in df.columns if 'keV' in k],['#2a78d6','#1baf7a','#eda100','#e34948','#6250d6']):
+			ax.plot(df.datetime,df[c].where(df[c]>0),lw=1,color=col,label=c)
+		ax.set(yscale='log',ylabel='STIX counts s$^{-1}$',xlabel='Time (UT'+(', Earth light-arrival' if earth_time else ', at Solar Orbiter')+')')
+		ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'));ax.legend(fontsize=8,ncol=5,frameon=False);ax.grid(alpha=.2)
+		fig.tight_layout();fig.savefig(csv.with_suffix('.png'),dpi=120);plt.close(fig)
+	print(f'STIX quick-look: {len(df)} samples, {len(parts)} daily files -> {csv}')
+	return df,str(csv)

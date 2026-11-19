@@ -1370,3 +1370,25 @@ def _bin_pick(rows, edges):
 		k = np.flatnonzero((t >= e[i]) & (t < hi))
 		out.append(rows[k[0]] if k.size else None)
 	return out
+
+
+def _soar_series(instrument, descriptor, sT, eT, dT, l2_dir, ll_dir, lowlatency=True):
+	"""First SOAR image in each dT bin: Level 2 first, low-latency LL02 for empty bins.
+	Returns {'L2': paths, 'LL02': paths, 'missing': bin start times (isot)}."""
+	starts = _target_times(sT, eT, dT)
+	t1 = _parse_time(eT)
+	edges = Time(list(starts[:-1]) + [t1]) if (t1 - starts[-1]).to_value(u.s) < 1 else Time(list(starts) + [t1])
+	l2 = _bin_pick(_soar_query('v_sc_data_item', instrument, descriptor, 'L2', edges[0], edges[-1]), edges)
+	ll = [None] * len(l2)
+	if lowlatency and any(r is None for r in l2):
+		ll = _bin_pick(_soar_query('v_ll_data_item', instrument, descriptor, 'LL02', edges[0], edges[-1]), edges)
+	out = {'L2': [], 'LL02': [], 'missing': []}
+	for i in range(len(l2)):
+		try:
+			if l2[i] is not None:out['L2'].append(_soar_fetch(l2[i], l2_dir))
+			elif ll[i] is not None:out['LL02'].append(_soar_fetch(ll[i], ll_dir, 'LOW_LATENCY'))
+			else:out['missing'].append(edges[i].isot)
+		except OSError as exc:
+			warnings.warn(f'SOAR download failed for {descriptor} bin {edges[i].isot}: {exc}')
+			out['missing'].append(edges[i].isot)
+	return out
