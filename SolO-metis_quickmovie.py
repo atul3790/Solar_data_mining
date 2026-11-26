@@ -6,7 +6,8 @@ Downloads Metis L2 visible-light tB files from the Solar Orbiter Archive (SOAR) 
 sT..eT, keeps one frame per dT, aligns them (north up, Sun centred), saves a FITS cube,
 writes PNG frames and stitches them into an MP4.
 
-How to use: edit the INPUT section below, then run   python metis_quickmovie.py
+How to use: edit the INPUT section below, then run   python SolO-metis_quickmovie.py
+All paths in INPUT are relative to basedir; the script changes into it and back.
 Needs: numpy, scipy, astropy, matplotlib, ffmpeg (or `pip install imageio-ffmpeg`)
 """
 import glob, os, shutil, subprocess, sys, warnings
@@ -38,8 +39,9 @@ rscale   = 2.0                     # diff images multiplied by r**rscale (0 = of
 clip     = 1.0                     # colour-scale percentile clip [%]
 
 # --- output ---
-datadir  = "/Metis/metis_tb"            # where FITS files are downloaded
-outdir   = "Metis"          # cube, PNG frames and mp4 go here
+basedir  = "/path/to/event_folder"   # event folder; datadir and outdir are inside it
+datadir  = "SolO/Metis/metis_tb"   # where FITS files are downloaded
+outdir   = "SolO/Metis"            # cube, PNG frames and mp4 go here
 fps      = 5                       # movie frames per second
 dpi      = 150                     # PNG resolution
 # =========================================================================================
@@ -211,4 +213,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    cwd = os.getcwd()
+    os.chdir(os.path.expanduser(basedir))
+    try:
+        main()
+    finally:
+        os.chdir(cwd)

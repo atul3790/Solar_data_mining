@@ -3,7 +3,8 @@ run_STIX_GOES_overlay.py -- task script: Solar Orbiter/STIX quick-look light cur
 GOES XRS overplotted, for one event interval.
 
 Uses Multiwb_datamine.get_STIX_LC (STIX, from ESA SOAR) and xray_lightcurves
-(GOES via SunPy Fido + overlay plot). Edit the INPUT block and run:  python run_STIX_GOES_overlay.py
+(GOES via SunPy Fido + overlay plot); both must be on PYTHONPATH.
+Edit the INPUT block and run:  python run_STIX_GOES_overlay.py
 """
 
 # =========================================================================================
@@ -11,7 +12,6 @@ Uses Multiwb_datamine.get_STIX_LC (STIX, from ESA SOAR) and xray_lightcurves
 # -----------------------------------------------------------------------------------------
 # ---- Event and paths ----
 # sT, eT          : interval start / end, UTC ISO strings ('YYYY-MM-DDTHH:MM:SS').
-# module_path     : folder containing Multiwb_datamine.py and xray_lightcurves.py.
 # output_folder   : results folder; STIX/ and GOES/ subfolders hold downloads and CSVs,
 #                   the overlay figure is written at its top level. Created if missing.
 #

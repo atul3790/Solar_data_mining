@@ -39,6 +39,9 @@ A two-page flow chart of how SDO, LASCO and STEREO images are downloaded, which 
 | `MWA_obscat_maker.py` | Creates MWA observing-catalog files. |
 | `hessi_flare_catalog.csv` | RHESSI flare catalog used by catalog-selection and quicklook utilities. |
 | `time_conv.py` | Helper routines for time conversion. |
+| `xray_lightcurves.py` | GOES XRS download (`get_GOES_XRS`) and the STIX + GOES overlay plot (`plot_STIX_GOES`). Detailed API below. |
+| `run_STIX_GOES_overlay.py` | Task script: STIX quick-look light curves with GOES XRS overplotted for one interval, in Earth light-arrival time. Edit its INPUT block and run it. |
+| `SolO-metis_quickmovie.py` | Task script: quick-look Solar Orbiter Metis tB movie (intensity, running or base difference) straight from SOAR, with an aligned FITS cube. Edit its INPUT block and run it. |
 
 ## Requirements and setup
 
@@ -233,16 +236,41 @@ It returns model/trace information including `outdir` and saves `boundary.fits`,
 
 `pfss_context_maps(sT,mission='SDO',instrument=None,wave=None,basedir='./',NOAA_number=None,...)` saves two PNGs in `basedir` for time `sT`: the full-Sun PFSS field with the AR lines over it in the frame-maker colours (`PFSS_fullSun_<label>_<time>.png`) and the AR-rooted field of the NOAA region (`PFSS_AR<NOAA>_<label>_<time>.png`). The background is the AIA, HMI or EUVI image nearest `sT`: the closest finished FITS already in `img_folder` within `max_image_dt` (default 3600 s), otherwise one downloaded within ±10 min, seen from Earth (`mission='SDO'`) or STEREO (`mission='STEREO-A'` or `'STEREO-B'`); `instrument=None` draws a blank disk with a Stonyhurst grid. On a blank full-Sun disk the AR rectangle (±`ar_half_lon` × ±`ar_half_lat`, rotated to `sT`) is outlined when `NOAA_number` is set. `maps='both'` (default), `'full'` or `'AR'` chooses which maps are saved. `AR_loop_reach_deg` (default 50) keeps only closed AR loops with both ends within that many degrees of the AR centre. An invalid instrument/wave pair (e.g. HMI with 193) raises an error; a missing image only falls back to the blank disk. It reuses the PFSS snapshot folders (`PFSS/<YYYYmmdd_HHMMSS>`) and the AR line cache of the frame makers. The AR map imports `noaa_region` and `pfss_projection` from the Moving_structure_frames project, which must be on the Python path. The frame makers call it at the midpoint of their window when `save_PFSS_maps=True`.
 
+## xray_lightcurves.py
+
+Disk-integrated X-ray light curves. STIX itself comes from `Multiwb_datamine.get_STIX_LC`; this module adds GOES and the overlay plot. All times are UTC.
+
+| Function | Inputs and behavior | Returns / saved products |
+|---|---|---|
+| `get_GOES_XRS(sT,eT,outdir='./GOES',`<br>`satellite=None,resolution='avg1m')` | GOES XRS fluxes through SunPy Fido (NOAA science-ready L2, not recalibrated). `satellite` is the GOES number (None = highest available); `resolution` is `'avg1m'` (1-min averages) or `'flx1s'` (1-s fluxes, large files). | `(DataFrame[datetime, xrsa, xrsb, xrsa_quality, xrsb_quality] in W m⁻², CSV path, satellite)`. Saves `outdir/GOES<N>_XRS_<res>_<sT>-<eT>.csv`. |
+| `plot_STIX_GOES(stix_df,goes_df,outpath,`<br>`bands=None,stix_rebin=None,`<br>`goes_channel='xrsb',goes_label='GOES',`<br>`stix_ylim=None,goes_ylim=(1e-7,1e-3),`<br>`xlim=None,time_label='Time (UT)',`<br>`title=None,figsize=(11,5.6),`<br>`fontsize=15,dpi=200)` | STIX counts/s on a left log axis and GOES flux on a right log axis, sharing the time axis. `stix_df` is e.g. `get_STIX_LC` output, `goes_df` e.g. `get_GOES_XRS` output. `bands` picks STIX columns (None = all); `stix_rebin` averages STIX over that many seconds (None = native 4 s); `xlim` is `(start, end)`. Say in `time_label` whether STIX is in Earth light-arrival time. | Saves and returns `outpath`. |
+
+```python
+import Multiwb_datamine as mwd, xray_lightcurves as xlc
+stix,_=mwd.get_STIX_LC('2025-05-30T07:00','2025-05-31T00:00',outdir='./SolO/STIX',earth_time=True,plot=False)
+goes,_,sat=xlc.get_GOES_XRS('2025-05-30T07:00','2025-05-31T00:00',outdir='./GOES')
+xlc.plot_STIX_GOES(stix,goes,f'STIX_GOES{sat}.png',bands=['4-10 keV','15-25 keV'],stix_rebin=60,
+	goes_label=f'GOES-{sat}',time_label='Time (UT, Earth light-arrival)')
+```
+
+## Task scripts
+
+Edit the INPUT block (a commented guide above it explains each setting) and run the file with `python <script>.py`.
+
+| Script | INPUT | What it does / saves |
+|---|---|---|
+| `run_STIX_GOES_overlay.py` | `sT`, `eT`, `output_folder`, `stix_rebin`, `goes_res_option` (1 = 1-min, 2 = 1-s), `earth_time`, `goes_satellite`, `goes_channel_option` (1 = 1–8 Å, 2 = 0.5–4 Å), `stix_bands`, `stix_ylim`, `goes_ylim`, `fig_format`, `out_tag` | Runs `get_STIX_LC`, `get_GOES_XRS` and `plot_STIX_GOES`. Saves STIX and GOES CSVs in `output_folder/STIX/` and `output_folder/GOES/` and the figure `STIX_GOES<N>_<tag>.<fig_format>` in `output_folder`. `main()` returns the CSV and figure paths. Needs this repository on `PYTHONPATH`. |
+| `SolO-metis_quickmovie.py` | `sT`, `eT`, `dT` (cadence, minutes), `mode` (`'intensity'`, `'running_diff'`, `'base_diff'`), `nbase` (frames median-combined as the base), `rscale` (differences × r^rscale), `clip` (colour percentile clip), `basedir`, `datadir`, `outdir`, `fps`, `dpi` | Self-contained (NumPy, SciPy, Astropy, Matplotlib; ffmpeg or `imageio-ffmpeg`). Queries SOAR for Metis L2 VL tB (`query_soar`), keeps the file nearest each `dT` step (`pick_cadence`), downloads to `datadir` (`download`), resamples every frame onto one north-up Sun-centred grid in R☉ (`read_frame`, `to_grid`, `build_cube`) and saves the cube (`save_cube`: `metis_<sT>_<eT>_cube.fits` with a TIMES table). `make_movie` writes PNG frames to `<movie>_frames/` and the MP4 `metis_<sT>_<eT>_<mode>.mp4` in `outdir`. Paths are relative to `basedir`. The hyphen in the file name means it is run as a script, not imported. |
+
 ## Companion code: moving-structure and overlay frames
 
-[`Moving_structure_frames`](https://github.com/atul3790/Solar_multiwb-big-data_analysis/tree/moving-structure-frames/Moving_structure_frames) (repository `Solar_multiwb-big-data_analysis`, branch `moving-structure-frames`) builds diagnostic movies from these modules. It follows CMEs and other moving structures in LASCO, STEREO COR2 and HI1 images, and makes overlay frames for LASCO, STEREO and PSP/WISPR. Each frame combines:
+[`Moving_structure_frames`](https://github.com/atul3790/Solar_multiwb-big-data_analysis/tree/main/Moving_structure_frames) (a folder on `main` of the repository `Solar_multiwb-big-data_analysis`) builds diagnostic movies from these modules:
 
-- bright and dark structure contours with in-plane drift arrows
-- projected PFSS field lines from the observing spacecraft's viewpoint
-- an EUV or magnetogram disk image
-- Fermi-LAT and GOES light curves
+- flow frames that follow CMEs and other moving structures in LASCO, STEREO COR1/COR2, COR2 + HI1 and Solar Orbiter Metis images, with bright/dark contours, in-plane drift arrows, projected PFSS field lines, an EUV or magnetogram disk image and Fermi-LAT / GOES / STIX light curves;
+- PFSS overlay frames for LASCO, STEREO and PSP/WISPR;
+- coronagraph + EUV overlay frames (Metis + EUI, LASCO + AIA, COR2 + EUVI) with a STIX + GOES panel.
 
-It downloads through `get_LASCO_imgs`, `get_STEREO_imgs` (including HI1) and `get_SDO_imgs`, loads every image with `load_map`, and builds PFSS with `solar_overlay.build_pfss`. Keep this repository on `PYTHONPATH` when using it.
+It downloads through `get_LASCO_imgs`, `get_STEREO_imgs` (including HI1), `get_SDO_imgs`, `get_Metis_imgs`/`get_SolO_imgs` and `get_STIX_LC`, loads every image with `load_map`, and builds PFSS with `solar_overlay.build_pfss`. Keep this repository on `PYTHONPATH` when using it.
 
 ## Scientific context
 
