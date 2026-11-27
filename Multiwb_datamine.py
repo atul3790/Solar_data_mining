@@ -1199,7 +1199,7 @@ def radspec_to_pickle(filname,outdir='./'):
 		indices=np.unique(np.linspace(
 			0,len(spec.times)-1,min(7,len(spec.times)),dtype=int))
 		ticks=spec.times[indices]
-		ax.set_xticks(ax.convert_xunits(ticks))
+		ax.set_xticks(ticks.to_datetime())	# spec.plot uses a matplotlib date axis
 		ax.set_xticklabels(ticks.utc.strftime('%H:%M'),rotation=0)
 		date=spec.start_time.utc.isot[:10]
 
